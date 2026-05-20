@@ -95,33 +95,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
             for app in apps {
                 let pid = app.processIdentifier
                 let element = AXUIElementCreateApplication(pid)
-                
-                var windowList: CFArray
+
                 var windowListRef: CFTypeRef?
                 let result = AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowListRef)
-                if result != .success { continue }
-                windowList = windowListRef as! CFArray
-                
-                if result == .success,
-                   let windowList = windowList as? [AXUIElement]
-                {
-                    Task { @MainActor in
-                        startObserving(pid: pid)
-                    }
-                    
+                guard result == .success,
+                      let windowListRef = windowListRef,
+                      CFGetTypeID(windowListRef) == CFArrayGetTypeID(),
+                      let windowList = (windowListRef as! CFArray) as? [AXUIElement]
+                else { continue }
+
+                // 앱당 MainActor Task 하나로 묶어 app-level + 윈도우 관찰을 일괄 등록.
+                // 원본은 윈도우마다 Task를 만들어 시작 시 수백 개가 큐잉되던 문제가 있었음.
+                Task { @MainActor in
+                    startObserving(pid: pid)
                     for window in windowList {
                         var titleValue: CFTypeRef?
                         AXUIElementCopyAttributeValue(window,
                                                       kAXTitleAttribute as CFString,
                                                       &titleValue)
-                        
+
                         if let title = titleValue as? String, !title.isEmpty {
                             debugLog("Window is being observed: \(title)")
                         }
-                        
-                        Task { @MainActor in
-                            startObserving(pid: pid, element: window)
-                        }
+
+                        startObserving(pid: pid, element: window)
                     }
                 }
             }
