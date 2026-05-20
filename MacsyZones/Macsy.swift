@@ -263,7 +263,7 @@ var shakeMagnitudeCount: CGFloat = 0
 var justDidMouseUp = false
 
 func getHoveredSectionWindow() -> SectionWindow? {
-    print("getHoveredSectionWindow(): isFitting = \(isFitting)")
+    debugLog("getHoveredSectionWindow(): isFitting = \(isFitting)")
     var hoveredSectionWindow: SectionWindow?
     
     guard let focusedScreen = getFocusedScreen() else {
