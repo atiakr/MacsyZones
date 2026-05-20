@@ -430,7 +430,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                     }
                 }
                 
-                if event.modifierFlags.contains(snapKey) && !isFitting && isMovingAWindow {
+                let snapKeyHeld = event.modifierFlags.contains(snapKey)
+                let snapEffective = snapKeyHeld != appSettings.invertSnapKey
+
+                if snapEffective && !isFitting && isMovingAWindow {
                     snapKeyUsed = true
                     setIsFitting(true)
                     userLayouts.currentLayout.show()
@@ -444,8 +447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                         userLayouts.currentLayout.hide()
                     }
                 }
-                
-                if !event.modifierFlags.contains(snapKey) {
+
+                if !snapEffective {
                     snapKeyUsed = false
                 }
             }

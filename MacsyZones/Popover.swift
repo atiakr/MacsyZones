@@ -428,7 +428,12 @@ struct Main: View {
                         .labelsHidden()
                         .pickerStyle(MenuPickerStyle())
                         .onChange(of: settings.snapKey) { _ in appSettings.save() }
-                        
+
+                        Toggle("Snap by default (hold Snap Key to free move)", isOn: $settings.invertSnapKey)
+                            .toggleStyle(.checkbox)
+                            .onChange(of: settings.invertSnapKey) { _ in appSettings.save() }
+                            .padding(.top, 4)
+
                         Toggle("Snap with right click", isOn: $settings.snapWithRightClick)
                             .toggleStyle(.checkbox)
                             .onChange(of: settings.snapWithRightClick) { _ in appSettings.save() }

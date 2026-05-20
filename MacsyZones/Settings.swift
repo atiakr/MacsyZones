@@ -31,6 +31,7 @@ struct AppSettingsData: Codable {
     var cycleWindowsBackwardShortcut: String?
     var snapHighlightStrategy: SnapHighlightStrategy?
     var enableLayoutSwitcher: Bool?
+    var invertSnapKey: Bool?
 }
 
 class AppSettings: UserData, ObservableObject {
@@ -53,6 +54,7 @@ class AppSettings: UserData, ObservableObject {
     private static let defaultCycleWindowsBackwardShortcut: String = "Command+["
     private static let defaultSnapHighlightStrategy: SnapHighlightStrategy = .centerProximity
     private static let defaultEnableLayoutSwitcher: Bool = true
+    private static let defaultInvertSnapKey: Bool = false
     
     @Published var modifierKey: String = defaultModifierKey
     @Published var snapKey: String = defaultSnapKey
@@ -72,6 +74,7 @@ class AppSettings: UserData, ObservableObject {
     @Published var cycleWindowsBackwardShortcut: String = defaultCycleWindowsBackwardShortcut
     @Published var snapHighlightStrategy: SnapHighlightStrategy = defaultSnapHighlightStrategy
     @Published var enableLayoutSwitcher: Bool = defaultEnableLayoutSwitcher
+    @Published var invertSnapKey: Bool = defaultInvertSnapKey
 
     init() {
         super.init(name: "AppSettings", data: "{}", fileName: "AppSettings.json")
@@ -102,6 +105,7 @@ class AppSettings: UserData, ObservableObject {
             self.cycleWindowsForwardShortcut = settings.cycleWindowsForwardShortcut ?? cycleWindowsForwardShortcut
             self.cycleWindowsBackwardShortcut = settings.cycleWindowsBackwardShortcut ?? cycleWindowsBackwardShortcut
             self.snapHighlightStrategy = settings.snapHighlightStrategy ?? snapHighlightStrategy
+            self.invertSnapKey = settings.invertSnapKey ?? invertSnapKey
         } catch {
             debugLog("Error parsing settings JSON: \(error)")
         }
@@ -127,7 +131,8 @@ class AppSettings: UserData, ObservableObject {
                 cycleWindowsForwardShortcut: cycleWindowsForwardShortcut,
                 cycleWindowsBackwardShortcut: cycleWindowsBackwardShortcut,
                 snapHighlightStrategy: snapHighlightStrategy,
-                enableLayoutSwitcher: enableLayoutSwitcher
+                enableLayoutSwitcher: enableLayoutSwitcher,
+                invertSnapKey: invertSnapKey
             )
             
             let jsonData = try JSONEncoder().encode(settings)
@@ -160,6 +165,7 @@ class AppSettings: UserData, ObservableObject {
         cycleWindowsBackwardShortcut = Self.defaultCycleWindowsBackwardShortcut
         snapHighlightStrategy = Self.defaultSnapHighlightStrategy
         enableLayoutSwitcher = Self.defaultEnableLayoutSwitcher
+        invertSnapKey = Self.defaultInvertSnapKey
         
         if #available(macOS 12.0, *) {
             quickSnapper.toggleHotkey?.register(for: quickSnapShortcut)

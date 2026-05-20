@@ -43,9 +43,9 @@ func setIsFitting(_ fitting: Bool) {
 
 func isSnapKeyPressed() -> Bool {
     guard appSettings.snapKey != "None" else { return false }
-    
+
     let currentFlags = NSEvent.modifierFlags
-    
+
     switch appSettings.snapKey {
     case "Shift":
         return currentFlags.contains(.shift)
@@ -60,10 +60,17 @@ func isSnapKeyPressed() -> Bool {
     }
 }
 
+// invertSnapKey가 true이면 "스냅이 기본, snap key 누르면 자유 이동"
+// false(기본)이면 기존대로 "snap key 누르면 스냅".
+func shouldSnapFromKey() -> Bool {
+    guard appSettings.snapKey != "None" else { return appSettings.invertSnapKey }
+    return isSnapKeyPressed() != appSettings.invertSnapKey
+}
+
 func checkSnapKeyOnWindowMoveStart() {
     if !macsyReady.isReady { return }
 
-    if isSnapKeyPressed() && !isFitting {
+    if shouldSnapFromKey() && !isFitting {
         if appSettings.selectPerDesktopLayout {
             if let layoutName = spaceLayoutPreferences.getCurrent() {
                 userLayouts.setCurrentLayout(name: layoutName)
