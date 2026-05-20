@@ -182,7 +182,6 @@ struct Main: View {
     
     @ObservedObject var layouts = userLayouts
     
-    @State var showNotProDialog = false
     @State var showAboutDialog = false
     @State var showResetToDefaultsDialog = false
     
@@ -684,13 +683,6 @@ struct Main: View {
                 .padding(10)
                 .background(Color.pink.opacity(0.2))
                 .cornerRadius(7)
-                .alert(isPresented: $showNotProDialog) {
-                    Alert(
-                        title: Text("Omg! 😊"),
-                        message: Text("You must buy MacsyZones Pro to unlock this feature."),
-                        dismissButton: .default(Text("OK"))
-                    )
-                }
             }
             #endif
             
