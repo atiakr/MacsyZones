@@ -159,7 +159,11 @@ class DonationReminder {
         panel = DonationReminderPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 640))
         
         let view = DonationReminderView(onDismiss: { self.dismiss() })
-        panel.contentView = NSHostingView(rootView: view)
+        let donationHosting = NSHostingView(rootView: view)
+        if #available(macOS 13.0, *) {
+            donationHosting.sizingOptions = []
+        }
+        panel.contentView = donationHosting
         
         panel.level = .floating
         panel.isReleasedWhenClosed = false

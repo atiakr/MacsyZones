@@ -314,8 +314,12 @@ class QuickSnapper: ObservableObject {
     
     init() {
         panel = QuickSnapperPanel(contentRect: NSRect(x: 0, y: 0, width: 350, height: 600))
-        panel.contentView = NSHostingView(rootView: QuickSnapperView(model: self,
-                                                                     windows: windows))
+        let initialHosting = NSHostingView(rootView: QuickSnapperView(model: self,
+                                                                      windows: windows))
+        if #available(macOS 13.0, *) {
+            initialHosting.sizingOptions = []
+        }
+        panel.contentView = initialHosting
         panel.level = .popUpMenu
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -426,6 +430,9 @@ class QuickSnapper: ObservableObject {
         self.windows = windows
         let hostingView = NSHostingView(rootView: QuickSnapperView(model: self,
                                                                    windows: windows))
+        if #available(macOS 13.0, *) {
+            hostingView.sizingOptions = []
+        }
         panel.contentView = hostingView
     }
     

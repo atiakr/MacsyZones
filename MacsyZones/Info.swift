@@ -223,7 +223,11 @@ class AccessibilityDialog {
                 exit(0)
             }
         )
-        panel.contentView = NSHostingView(rootView: view)
+        let accessibilityHosting = NSHostingView(rootView: view)
+        if #available(macOS 13.0, *) {
+            accessibilityHosting.sizingOptions = []
+        }
+        panel.contentView = accessibilityHosting
         
         panel.level = .screenSaver
         panel.isReleasedWhenClosed = false
@@ -361,7 +365,11 @@ class UpdateFailedDialog {
                 self.dismiss()
             }
         )
-        panel.contentView = NSHostingView(rootView: view)
+        let updateFailedHosting = NSHostingView(rootView: view)
+        if #available(macOS 13.0, *) {
+            updateFailedHosting.sizingOptions = []
+        }
+        panel.contentView = updateFailedHosting
         
         panel.level = .floating
         panel.isReleasedWhenClosed = false
