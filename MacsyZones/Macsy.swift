@@ -216,33 +216,37 @@ func onObserverNotification(observer: AXObserver, element: AXUIElement, notifica
         return
     }
     
-    var app: CFTypeRef?
-    result = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &app)
-    guard result == .success else {
+    var appRef: CFTypeRef?
+    result = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &appRef)
+    guard result == .success,
+          let appRef = appRef,
+          CFGetTypeID(appRef) == AXUIElementGetTypeID()
+    else {
         return
     }
-    
-    var title: CFTypeRef?
-    result = AXUIElementCopyAttributeValue(app as! AXUIElement, kAXTitleAttribute as CFString, &title)
-    if result != .success {
-        title = "" as CFTypeRef
-    }
- 
+    let appElement = appRef as! AXUIElement
+
+    var titleRef: CFTypeRef?
+    AXUIElementCopyAttributeValue(appElement, kAXTitleAttribute as CFString, &titleRef)
+    let title = (titleRef as? String) ?? ""
+
     switch notification as String {
     case kAXWindowMovedNotification:
         var position: CGPoint = .zero
         var positionRef: CFTypeRef?
         result = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef)
-        if result == .success {
-            AXValueGetValue(positionRef as! AXValue, AXValueType.cgPoint, &position)
+        if result == .success,
+           let posRef = positionRef,
+           CFGetTypeID(posRef) == AXValueGetTypeID()
+        {
+            AXValueGetValue(posRef as! AXValue, AXValueType.cgPoint, &position)
         }
-        
-        onWindowMoved(observer: observer, element: element, notification: notification, title: title as! String, position: position)
-        
-        break
+
+        onWindowMoved(observer: observer, element: element, notification: notification, title: title, position: position)
+
     case kAXUIElementDestroyedNotification:
-        debugLog("App exited: \(title as! String)")
-        break
+        debugLog("App exited: \(title)")
+
     default:
         break
     }
