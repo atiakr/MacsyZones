@@ -174,30 +174,7 @@ class DonationReminder {
     }
     
     func count() {
-        if macsyProLock.isPro {
-            return
-        }
-        
-        countI += 1
-        
-        if countI % interval == 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                if #available(macOS 12.0, *) {
-                    if isQuickSnapping {
-                        self.panel.orderFront(nil)
-                        quickSnapper.panel.makeKeyAndOrderFront(nil)
-                    } else {
-                        self.panel.makeKeyAndOrderFront(nil)
-                    }
-                } else {
-                    self.panel.makeKeyAndOrderFront(nil)
-                }
-                
-                self.panel.center()
-            }
-            
-            countI = 0
-        }
+        // 도네이션 알림 비활성화 (개인 빌드용)
     }
     
     func dismiss() {
