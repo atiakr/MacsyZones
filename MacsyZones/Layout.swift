@@ -776,11 +776,11 @@ class SectionWindow: Hashable, ObservableObject {
     }
     
     static func == (lhs: SectionWindow, rhs: SectionWindow) -> Bool {
-        lhs.number == rhs.number
+        lhs === rhs
     }
-    
+
     func hash(into hasher: inout Hasher) {
-        hasher.combine(number)
+        hasher.combine(ObjectIdentifier(self))
     }
 }
 
