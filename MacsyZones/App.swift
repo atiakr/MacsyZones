@@ -49,6 +49,7 @@ var updateFailedDialog: UpdateFailedDialog?
 var mouseUpMonitor: Any?
 var mouseDownMonitor: Any?
 var mouseDragMonitor: Any?
+var rightClickMonitor: Any?
 
 var isPreview: Bool {
     return ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
@@ -492,7 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     }
     
     private func monitorRightClick() {
-        mouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .rightMouseDown) { event in
+        rightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .rightMouseDown) { event in
             if !macsyReady.isReady { return }
             if event.buttonNumber != 1 { return }
             if !appSettings.snapWithRightClick { return }
@@ -521,8 +522,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        if let mouseUpMonitor = mouseUpMonitor {
-            NSEvent.removeMonitor(mouseUpMonitor)
+        for monitor in [mouseDownMonitor, mouseDragMonitor, mouseUpMonitor, rightClickMonitor] {
+            if let monitor = monitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
     }
 }
