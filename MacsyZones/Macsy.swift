@@ -655,39 +655,29 @@ func resizeAndMoveWindow(element: AXUIElement, newPosition: CGPoint, newSize: CG
     var lastPositionResult: AXError = .success
     var lastSizeResult: AXError = .success
     
+    // 비동기 retry 큐잉: async setter는 함수 리턴 뒤 실행되므로 같은 메인 스레드에서
+    // 결과를 동기 검사할 수 없다(과거에는 stale state를 보고 early return을 시도하던 dead path가 있었음).
     for i in 0..<(retries == 0 ? 1 : retries) {
         DispatchQueue.main.asyncAfter(deadline: .now() + (0.05 * Double(i))) { [element] in
-            var sizeValue: CGSize
-            
             var positionValue = newPosition
             if let positionAXValue = AXValueCreate(.cgPoint, &positionValue) {
                 let result = AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, positionAXValue)
-                
+
                 if result != .success {
                     debugLog("Failed to set window position, error code: \(result.rawValue)")
                     debugLog(getWindowDetails(element: element))
                 }
             }
-            
-            sizeValue = newSize
+
+            var sizeValue = newSize
             if let sizeAXValue = AXValueCreate(.cgSize, &sizeValue) {
                 let result = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeAXValue)
-                
+
                 if result != .success {
                     debugLog("Failed to set window size, error code: \(result.rawValue)")
                     debugLog(getWindowDetails(element: element))
                 }
             }
-        }
-        
-        if let windowId = getWindowID(from: element),
-           case let (currentSize, currentPosition) = getWindowSizeAndPosition(from: windowId)
-        {
-            if currentSize == newSize && currentPosition == newPosition {
-                return
-            }
-        } else {
-            break
         }
     }
     
