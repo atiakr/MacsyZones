@@ -10,10 +10,37 @@
 // See LICENSE file.
 //
 
+/// Cached accessor for `NSScreen.screens`. The underlying property hits the
+/// system every read; we invalidate on `didChangeScreenParametersNotification`
+/// so the cache is always consistent with display reconfiguration.
+enum ScreenCache {
+    private static var cachedScreens: [NSScreen]?
+    private static var observer: NSObjectProtocol?
+
+    static var screens: [NSScreen] {
+        if let cached = cachedScreens { return cached }
+        let snapshot = NSScreen.screens
+        cachedScreens = snapshot
+        ensureObserver()
+        return snapshot
+    }
+
+    private static func ensureObserver() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            cachedScreens = nil
+        }
+    }
+}
+
 private var lastFocusedScreen: NSScreen?
 
 func getFocusedScreen() -> NSScreen? {
-    if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) {
+    if let screen = ScreenCache.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) {
         lastFocusedScreen = screen
         return screen
     }
@@ -28,14 +55,14 @@ func getScreenNumber(screen: NSScreen) -> Int? {
             screenIndex = Int(displayId)
         }
     } else {
-        screenIndex = NSScreen.screens.firstIndex(of: screen)
+        screenIndex = ScreenCache.screens.firstIndex(of: screen)
     }
 
     return screenIndex
 }
 
 func resolveScreen(screenNumber: Int) -> NSScreen? {
-    if let screen = NSScreen.screens.first(where: { getScreenNumber(screen: $0) == screenNumber }) {
+    if let screen = ScreenCache.screens.first(where: { getScreenNumber(screen: $0) == screenNumber }) {
         return screen
     }
 

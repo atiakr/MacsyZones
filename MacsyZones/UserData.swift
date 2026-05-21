@@ -72,7 +72,8 @@ struct GridConfig: Codable {
         let width = CGFloat(maxCol - minCol + 1) * cellWidth
         let height = CGFloat(maxRow - minRow + 1) * cellHeight
 
-        let toppestY = NSScreen.screens.first!.frame.origin.y + NSScreen.screens.first!.frame.height
+        let primaryFrame = ScreenCache.screens.first!.frame
+        let toppestY = primaryFrame.origin.y + primaryFrame.height
         let visibleTopInAX = toppestY - (visible.origin.y + visible.height)
         let axY = visibleTopInAX + CGFloat(minRow) * cellHeight
 

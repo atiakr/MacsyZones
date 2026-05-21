@@ -651,7 +651,7 @@ func resizeAndMoveWindow(element: AXUIElement, newPosition: CGPoint, newSize: CG
      * macOS has a bug, when you move & resize a window downward, the window is not being resized correctly.
      * This code fixes this buggy behavior of macOS 😇
      */
-    if NSScreen.screens.count > 1 {
+    if ScreenCache.screens.count > 1 {
         var sizeValue = CGSize(width: newSize.width, height: newSize.height - 10)
         if let sizeAXValue = AXValueCreate(.cgSize, &sizeValue) {
             let result = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeAXValue)
@@ -781,7 +781,8 @@ func getAXPosition(for window: NSWindow) -> CGPoint? {
 
 extension NSScreen {
     var axY: CGFloat {
-        let toppestY = NSScreen.screens.first!.frame.origin.y + NSScreen.screens.first!.frame.height
+        let primaryFrame = ScreenCache.screens.first!.frame
+        let toppestY = primaryFrame.origin.y + primaryFrame.height
         return toppestY - (frame.origin.y + frame.height)
     }
 }
