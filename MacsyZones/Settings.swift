@@ -111,7 +111,31 @@ class AppSettings: UserData, ObservableObject {
         }
     }
 
+    private var pendingSaveWorkItem: DispatchWorkItem?
+
+    /// Coalesce rapid `save()` calls (e.g. slider drags) into a single disk write
+    /// once the user stops changing the value for `delay` seconds.
+    func saveDebounced(after delay: TimeInterval = 0.3) {
+        pendingSaveWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.save()
+        }
+        pendingSaveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Force any pending debounced save to run immediately. Call before
+    /// app termination or other points that need the latest values on disk.
+    func flushPendingSave() {
+        guard let work = pendingSaveWorkItem else { return }
+        work.cancel()
+        pendingSaveWorkItem = nil
+        save()
+    }
+
     override func save() {
+        pendingSaveWorkItem?.cancel()
+        pendingSaveWorkItem = nil
         do {
             let settings = AppSettingsData(
                 modifierKey: modifierKey,

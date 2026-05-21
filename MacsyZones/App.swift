@@ -522,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        appSettings.flushPendingSave()
         for monitor in [mouseDownMonitor, mouseDragMonitor, mouseUpMonitor, rightClickMonitor] {
             if let monitor = monitor {
                 NSEvent.removeMonitor(monitor)

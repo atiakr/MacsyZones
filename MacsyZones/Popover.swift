@@ -474,7 +474,7 @@ struct Main: View {
                             get: { Double(settings.modifierKeyDelay) },
                             set: { settings.modifierKeyDelay = Int($0) }
                         ), in: 0...2000, step: 100)
-                        .onChange(of: settings.modifierKeyDelay) { _ in appSettings.save() }
+                        .onChange(of: settings.modifierKeyDelay) { _ in appSettings.saveDebounced() }
                     }
                     
                     Divider().padding(.vertical, 2)
@@ -565,7 +565,7 @@ struct Main: View {
                                 get: { Double(settings.snapResizeThreshold) },
                                 set: { settings.snapResizeThreshold = CGFloat($0) }
                             ), in: 5...67, step: 2)
-                            .onChange(of: settings.snapResizeThreshold) { _ in appSettings.save() }
+                            .onChange(of: settings.snapResizeThreshold) { _ in appSettings.saveDebounced() }
                             
                             Toggle("Show snap resizers on hover", isOn: $settings.showSnapResizersOnHover)
                                 .toggleStyle(.checkbox)
@@ -652,7 +652,7 @@ struct Main: View {
                                 get: { Double(100000 - settings.shakeAccelerationThreshold) },
                                 set: { settings.shakeAccelerationThreshold = CGFloat(100000 - $0) }
                             ), in: 10000...100000, step: 5000)
-                            .onChange(of: settings.shakeAccelerationThreshold) { _ in appSettings.save() }
+                            .onChange(of: settings.shakeAccelerationThreshold) { _ in appSettings.saveDebounced() }
                         }
                     }
                     
