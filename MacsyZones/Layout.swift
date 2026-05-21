@@ -909,6 +909,42 @@ struct LayoutView: View {
 func macssyStartEditing() { startEditing() }
 func macsyStopEditing() { stopEditing() }
 
+/// Per-section adjacency flags used by smart-gap detection and smart padding.
+fileprivate struct AdjacencyInfo {
+    var hasAdjacentLeft: Bool = false
+    var hasAdjacentRight: Bool = false
+    var hasAdjacentTop: Bool = false
+    var hasAdjacentBottom: Bool = false
+
+    var hasAny: Bool {
+        hasAdjacentLeft || hasAdjacentRight || hasAdjacentTop || hasAdjacentBottom
+    }
+}
+
+/// Snapshot of the current on-screen window set with their alpha values.
+/// Built from a single CGWindowList call so callers can avoid the per-window
+/// `CGWindowListCopyWindowInfo(.optionIncludingWindow, ...)` lookups that were
+/// previously made just to read kCGWindowAlpha.
+struct WindowVisibilitySnapshot {
+    let onScreenWindowIDs: Set<UInt32>
+    let alphas: [UInt32: CGFloat]
+
+    static func current() -> WindowVisibilitySnapshot {
+        var ids = Set<UInt32>()
+        var alphas: [UInt32: CGFloat] = [:]
+        if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
+            for info in list {
+                guard let id = info[kCGWindowNumber as String] as? UInt32 else { continue }
+                ids.insert(id)
+                if let alpha = info[kCGWindowAlpha as String] as? CGFloat {
+                    alphas[id] = alpha
+                }
+            }
+        }
+        return WindowVisibilitySnapshot(onScreenWindowIDs: ids, alphas: alphas)
+    }
+}
+
 class LayoutWindow: ObservableObject {
     var name: String
     var sectionConfigs: [Int:SectionConfig] = [:]
@@ -930,7 +966,13 @@ class LayoutWindow: ObservableObject {
     var snapResizerProximityThreshold: CGFloat { appSettings.snapResizeThreshold }
     
     var activeSnapResizers: [String: SnapResizer] = [:]
-    
+
+    private var cachedSnapResizerInfo: [(rect: NSRect, relatedSections: [RelatedSection], mode: SnapResizerMode)] = []
+    private var cachedSnapResizerKey: (signature: CGFloat, threshold: CGFloat, count: Int)?
+
+    fileprivate var cachedAdjacencyInfo: [ObjectIdentifier: AdjacencyInfo] = [:]
+    fileprivate var cachedAdjacencyKey: (signature: CGFloat, screenSignature: CGFloat, count: Int)?
+
     @Published var zoneLayoutVersion: Int = 0
 
     var nextNumber: Int {
@@ -1015,149 +1057,95 @@ class LayoutWindow: ObservableObject {
         }
     }
     
-    func hasAnyAdjacentZones() -> Bool {
+    /// Compute (or reuse cached) per-section adjacency info. Single O(n²) pass
+    /// shared by `hasAnyAdjacentZones()` and `applySmartPadding()`.
+    fileprivate func computeAdjacencyInfo() -> [ObjectIdentifier: AdjacencyInfo] {
         let adjacencyThreshold: CGFloat = 10
         let screenFrame = window.frame
-        
-        for sectionWindow in sectionWindows {
-            let originalFrame = sectionWindow.editorWindow.frame
-            
-            let left = originalFrame.minX
-            let right = originalFrame.maxX
-            let top = originalFrame.maxY
-            let bottom = originalFrame.minY
-            
-            if abs(left - screenFrame.minX) <= adjacencyThreshold ||
-               abs(right - screenFrame.maxX) <= adjacencyThreshold ||
-               abs(top - screenFrame.maxY) <= adjacencyThreshold ||
-               abs(bottom - screenFrame.minY) <= adjacencyThreshold {
-                return true
-            }
-            
-            for otherWindow in sectionWindows {
-                guard otherWindow !== sectionWindow else { continue }
-                
-                let otherFrame = otherWindow.editorWindow.frame
-                let otherLeft = otherFrame.minX
-                let otherRight = otherFrame.maxX
-                let otherTop = otherFrame.maxY
-                let otherBottom = otherFrame.minY
-                
-                if abs(left - otherRight) <= adjacencyThreshold {
-                    let overlapTop = min(top, otherTop)
-                    let overlapBottom = max(bottom, otherBottom)
-                    if overlapTop > overlapBottom {
-                        return true
-                    }
-                }
-                
-                if abs(right - otherLeft) <= adjacencyThreshold {
-                    let overlapTop = min(top, otherTop)
-                    let overlapBottom = max(bottom, otherBottom)
-                    if overlapTop > overlapBottom {
-                        return true
-                    }
-                }
-                
-                if abs(top - otherBottom) <= adjacencyThreshold {
-                    let overlapLeft = max(left, otherLeft)
-                    let overlapRight = min(right, otherRight)
-                    if overlapRight > overlapLeft {
-                        return true
-                    }
-                }
-                
-                if abs(bottom - otherTop) <= adjacencyThreshold {
-                    let overlapLeft = max(left, otherLeft)
-                    let overlapRight = min(right, otherRight)
-                    if overlapRight > overlapLeft {
-                        return true
-                    }
-                }
-            }
+
+        var signature: CGFloat = 0
+        for sw in sectionWindows {
+            let f = sw.editorWindow.frame
+            signature += f.origin.x + f.origin.y + f.width + f.height
         }
-        
-        return false
+        let screenSignature = screenFrame.origin.x + screenFrame.origin.y + screenFrame.width + screenFrame.height
+
+        if let key = cachedAdjacencyKey,
+           key.signature == signature,
+           key.screenSignature == screenSignature,
+           key.count == sectionWindows.count {
+            return cachedAdjacencyInfo
+        }
+
+        var result: [ObjectIdentifier: AdjacencyInfo] = [:]
+
+        for sectionWindow in sectionWindows {
+            let frame = sectionWindow.editorWindow.frame
+            let left = frame.minX
+            let right = frame.maxX
+            let top = frame.maxY
+            let bottom = frame.minY
+
+            var info = AdjacencyInfo()
+            info.hasAdjacentLeft = abs(left - screenFrame.minX) <= adjacencyThreshold
+            info.hasAdjacentRight = abs(right - screenFrame.maxX) <= adjacencyThreshold
+            info.hasAdjacentTop = abs(top - screenFrame.maxY) <= adjacencyThreshold
+            info.hasAdjacentBottom = abs(bottom - screenFrame.minY) <= adjacencyThreshold
+
+            for otherWindow in sectionWindows where otherWindow !== sectionWindow {
+                let other = otherWindow.editorWindow.frame
+                let oL = other.minX
+                let oR = other.maxX
+                let oT = other.maxY
+                let oB = other.minY
+
+                if !info.hasAdjacentLeft && abs(left - oR) <= adjacencyThreshold {
+                    if min(top, oT) > max(bottom, oB) { info.hasAdjacentLeft = true }
+                }
+                if !info.hasAdjacentRight && abs(right - oL) <= adjacencyThreshold {
+                    if min(top, oT) > max(bottom, oB) { info.hasAdjacentRight = true }
+                }
+                if !info.hasAdjacentTop && abs(top - oB) <= adjacencyThreshold {
+                    if min(right, oR) > max(left, oL) { info.hasAdjacentTop = true }
+                }
+                if !info.hasAdjacentBottom && abs(bottom - oT) <= adjacencyThreshold {
+                    if min(right, oR) > max(left, oL) { info.hasAdjacentBottom = true }
+                }
+            }
+
+            result[ObjectIdentifier(sectionWindow)] = info
+        }
+
+        cachedAdjacencyInfo = result
+        cachedAdjacencyKey = (signature, screenSignature, sectionWindows.count)
+        return result
     }
-    
+
+    func hasAnyAdjacentZones() -> Bool {
+        let info = computeAdjacencyInfo()
+        return info.values.contains { $0.hasAny }
+    }
+
     func applySmartPadding() {
         let padding: CGFloat = 4
-        let adjacencyThreshold: CGFloat = 10
-        
-        let screenFrame = window.frame
-        
+        let info = computeAdjacencyInfo()
+
         for sectionWindow in sectionWindows {
+            guard let adj = info[ObjectIdentifier(sectionWindow)] else { continue }
+
             let originalFrame = sectionWindow.editorWindow.frame
             var newFrame = originalFrame
-            
-            
-            let left = originalFrame.minX
-            let right = originalFrame.maxX
-            let top = originalFrame.maxY
-            let bottom = originalFrame.minY
-            
-            let isAtScreenLeft = abs(left - screenFrame.minX) <= adjacencyThreshold
-            let isAtScreenRight = abs(right - screenFrame.maxX) <= adjacencyThreshold
-            let isAtScreenTop = abs(top - screenFrame.maxY) <= adjacencyThreshold
-            let isAtScreenBottom = abs(bottom - screenFrame.minY) <= adjacencyThreshold
-            
-            var hasAdjacentLeft = isAtScreenLeft
-            var hasAdjacentRight = isAtScreenRight
-            var hasAdjacentTop = isAtScreenTop
-            var hasAdjacentBottom = isAtScreenBottom
-            
-            for otherWindow in sectionWindows {
-                guard otherWindow !== sectionWindow else { continue }
-                
-                let otherFrame = otherWindow.editorWindow.frame
-                let otherLeft = otherFrame.minX
-                let otherRight = otherFrame.maxX
-                let otherTop = otherFrame.maxY
-                let otherBottom = otherFrame.minY
-                
-                if !hasAdjacentLeft && abs(left - otherRight) <= adjacencyThreshold {
-                    let overlapTop = min(top, otherTop)
-                    let overlapBottom = max(bottom, otherBottom)
-                    if overlapTop > overlapBottom {
-                        hasAdjacentLeft = true
-                    }
-                }
-                
-                if !hasAdjacentRight && abs(right - otherLeft) <= adjacencyThreshold {
-                    let overlapTop = min(top, otherTop)
-                    let overlapBottom = max(bottom, otherBottom)
-                    if overlapTop > overlapBottom {
-                        hasAdjacentRight = true
-                    }
-                }
-                
-                if !hasAdjacentTop && abs(top - otherBottom) <= adjacencyThreshold {
-                    let overlapLeft = max(left, otherLeft)
-                    let overlapRight = min(right, otherRight)
-                    if overlapRight > overlapLeft {
-                        hasAdjacentTop = true
-                    }
-                }
-                
-                if !hasAdjacentBottom && abs(bottom - otherTop) <= adjacencyThreshold {
-                    let overlapLeft = max(left, otherLeft)
-                    let overlapRight = min(right, otherRight)
-                    if overlapRight > overlapLeft {
-                        hasAdjacentBottom = true
-                    }
-                }
-            }
-            
-            let leftPadding: CGFloat = hasAdjacentLeft ? padding : 0
-            let rightPadding: CGFloat = hasAdjacentRight ? padding : 0
-            let topPadding: CGFloat = hasAdjacentTop ? padding : 0
-            let bottomPadding: CGFloat = hasAdjacentBottom ? padding : 0
-            
+
+            let leftPadding: CGFloat = adj.hasAdjacentLeft ? padding : 0
+            let rightPadding: CGFloat = adj.hasAdjacentRight ? padding : 0
+            let topPadding: CGFloat = adj.hasAdjacentTop ? padding : 0
+            let bottomPadding: CGFloat = adj.hasAdjacentBottom ? padding : 0
+
             newFrame.origin.x += leftPadding
             newFrame.origin.y += bottomPadding
             newFrame.size.width -= (leftPadding + rightPadding)
             newFrame.size.height -= (bottomPadding + topPadding)
-            
+
             sectionWindow.editorWindow.setFrame(newFrame, display: true, animate: true)
             sectionWindow.window.setFrame(newFrame, display: true, animate: true)
         }
@@ -1181,16 +1169,22 @@ class LayoutWindow: ObservableObject {
         else { return }
 
         debugLog("LayoutWindow.handleMouseMoved(): currentLayout: \(userLayouts.currentLayout.name)")
-        
+
         let mouseLocation = NSEvent.mouseLocation
         let resizerRectsWithInfo = calculateSnapResizerRectsWithInfo()
 
         debugLog("resizerRectsWithInfo: \(resizerRectsWithInfo.map { rectKey($0.rect) })")
 
+        // Build the visibility snapshot lazily: only pay for it once if any rect is near the mouse.
+        var visibilitySnapshot: WindowVisibilitySnapshot?
         let proximityRects = resizerRectsWithInfo.filter {
-            $0.rect.insetBy(dx: -snapResizerProximityThreshold,
-                            dy: -snapResizerProximityThreshold)
-                .contains(mouseLocation) && hasVisibleSnappedWindow(in: $0.relatedSections)
+            guard $0.rect.insetBy(dx: -snapResizerProximityThreshold,
+                                  dy: -snapResizerProximityThreshold)
+                .contains(mouseLocation) else { return false }
+            if visibilitySnapshot == nil {
+                visibilitySnapshot = WindowVisibilitySnapshot.current()
+            }
+            return hasVisibleSnappedWindow(in: $0.relatedSections, using: visibilitySnapshot)
         }
         var newActiveKeys: Set<String> = []
         
@@ -1236,28 +1230,17 @@ class LayoutWindow: ObservableObject {
         return String(format: "%.1f,%.1f,%.1f,%.1f", rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)
     }
 
-    func hasVisibleSnappedWindow(in relatedSections: [RelatedSection]) -> Bool {
-        let onScreenWindowIDs: Set<UInt32> = {
-            guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-                return []
-            }
-            var ids = Set<UInt32>()
-            for info in windowList {
-                if let windowId = info[kCGWindowNumber as String] as? UInt32 {
-                    ids.insert(windowId)
-                }
-            }
-            return ids
-        }()
+    func hasVisibleSnappedWindow(in relatedSections: [RelatedSection], using snapshot: WindowVisibilitySnapshot? = nil) -> Bool {
+        let snap = snapshot ?? WindowVisibilitySnapshot.current()
 
-        debugLog("onScreenWindowIDs: \(onScreenWindowIDs)")
+        debugLog("onScreenWindowIDs: \(snap.onScreenWindowIDs)")
 
         let sectionNumbers = Set(relatedSections.map { $0.sectionWindow.number })
 
         for (windowId, sectionNumber) in PlacedWindows.windows {
             guard sectionNumbers.contains(sectionNumber) else { continue }
             guard PlacedWindows.layouts[windowId] == name else { continue }
-            guard onScreenWindowIDs.contains(windowId) else { continue }
+            guard snap.onScreenWindowIDs.contains(windowId) else { continue }
 
             if let element = PlacedWindows.elements[windowId] {
                 var minimizedValue: AnyObject?
@@ -1273,10 +1256,7 @@ class LayoutWindow: ObservableObject {
                 }
             }
 
-            if let wList = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(windowId)) as? [[String: Any]],
-               let wInfo = wList.first,
-               let alpha = wInfo[kCGWindowAlpha as String] as? CGFloat,
-               alpha <= 0 {
+            if let alpha = snap.alphas[windowId], alpha <= 0 {
                 continue
             }
 
@@ -1287,12 +1267,29 @@ class LayoutWindow: ObservableObject {
     }
 
     func calculateSnapResizerRectsWithInfo() -> [(rect: NSRect, relatedSections: [RelatedSection], mode: SnapResizerMode)] {
+        let threshold = appSettings.snapResizeThreshold
+
+        // Frame signature: cheap O(n) sum of all section frame edges. Catches any
+        // resize/move/add/remove since the last cache write.
+        var signature: CGFloat = 0
+        for sw in sectionWindows {
+            let f = sw.window.frame
+            signature += f.origin.x + f.origin.y + f.width + f.height
+        }
+
+        if let key = cachedSnapResizerKey,
+           key.signature == signature,
+           key.threshold == threshold,
+           key.count == sectionWindows.count {
+            return cachedSnapResizerInfo
+        }
+
         var result: [(rect: NSRect, relatedSections: [RelatedSection], mode: SnapResizerMode)] = []
         let verticalButtonWidth: CGFloat = 8
         let verticalButtonHeight: CGFloat = 50
         let horizontalButtonWidth: CGFloat = 50
         let horizontalButtonHeight: CGFloat = 8
-        
+
         for sectionWindow in sectionWindows {
             let sectionFrame = sectionWindow.window.frame
             for otherSectionWindow in sectionWindows where otherSectionWindow !== sectionWindow {
@@ -1361,9 +1358,13 @@ class LayoutWindow: ObservableObject {
                 }
             }
         }
+
+        cachedSnapResizerInfo = result
+        cachedSnapResizerKey = (signature, threshold, sectionWindows.count)
+
         return result
     }
-    
+
     func onSectionDelete(unowned sectionWindow: SectionWindow) {
         let number = sectionWindow.number
         
