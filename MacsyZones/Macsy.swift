@@ -273,92 +273,124 @@ var shakeMagnitudeCount: CGFloat = 0
 
 var justDidMouseUp = false
 
+// Per-section precomputed geometry. Independent of mouse position — only depends
+// on (layout, screen, section frames). Lets each mouse-move tick run pure
+// arithmetic (CGRect.contains, squared distance) instead of recomputing bounds.
+struct CachedSectionGeometry {
+    let window: SectionWindow
+    let rect: CGRect          // full snap area in screen coords
+    let centerHitRect: CGRect // 100×100 box around center for prioritizeCenterToSnap
+    let center: CGPoint
+    let area: CGFloat
+}
+
+var cachedSectionGeometries: [CachedSectionGeometry] = []
+var cachedSectionGeometriesKey: (layoutName: String, screenId: ObjectIdentifier, signature: CGFloat, count: Int)?
+
 func getHoveredSectionWindow() -> SectionWindow? {
     debugLog("getHoveredSectionWindow(): isFitting = \(isFitting)")
-    var hoveredSectionWindow: SectionWindow?
-    
+
     guard let focusedScreen = getFocusedScreen() else {
         for layout in userLayouts.layouts.values {
             for sectionWindow in layout.layoutWindow.sectionWindows {
-                sectionWindow.isHovered = false
+                if sectionWindow.isHovered { sectionWindow.isHovered = false }
             }
         }
-        
+        cachedSectionGeometriesKey = nil
         return nil
     }
-    
+
     let mouseLocation = NSEvent.mouseLocation
-    
+    let sectionWindows = userLayouts.currentLayout.layoutWindow.sectionWindows
+    var hoveredSectionWindow: SectionWindow?
+
     if isFitting {
+        let currentLayoutName = userLayouts.currentLayoutName
+        let screenId = ObjectIdentifier(focusedScreen)
+
+        // Cheap O(n) signature of section frames — detects in-place edits
+        // (resize/move) without touching getBounds() unless something changed.
+        var signature: CGFloat = 0
+        for sw in sectionWindows {
+            let f = sw.window.frame
+            signature += f.origin.x + f.origin.y + f.width + f.height
+        }
+
+        let needsRecompute: Bool = {
+            guard let key = cachedSectionGeometriesKey else { return true }
+            return key.layoutName != currentLayoutName
+                || key.screenId != screenId
+                || key.count != sectionWindows.count
+                || key.signature != signature
+        }()
+
+        if needsRecompute {
+            let screenFrame = focusedScreen.frame
+            let screenSize = screenFrame.size
+            let screenOrigin = screenFrame.origin
+
+            cachedSectionGeometries = sectionWindows.map { sw in
+                let b = sw.getBounds(for: focusedScreen)
+                let width = b.widthPercentage * screenSize.width
+                let height = b.heightPercentage * screenSize.height
+                let x = screenOrigin.x + b.xPercentage * screenSize.width
+                let y = screenOrigin.y + b.yPercentage * screenSize.height
+                let cx = x + width / 2
+                let cy = y + height / 2
+                return CachedSectionGeometry(
+                    window: sw,
+                    rect: CGRect(x: x, y: y, width: width, height: height),
+                    centerHitRect: CGRect(x: cx - 50, y: cy - 50, width: 100, height: 100),
+                    center: CGPoint(x: cx, y: cy),
+                    area: width * height
+                )
+            }
+            cachedSectionGeometriesKey = (currentLayoutName, screenId, signature, sectionWindows.count)
+        }
+
         if appSettings.snapHighlightStrategy != .centerProximity && appSettings.prioritizeCenterToSnap {
-            for sectionWindow in userLayouts.currentLayout.layoutWindow.sectionWindows {
-                let screenSize = focusedScreen.frame
-                let bounds = sectionWindow.getBounds(for: focusedScreen)
-                let width = bounds.widthPercentage * screenSize.width
-                let height = bounds.heightPercentage * screenSize.height
-                let x = focusedScreen.frame.origin.x + (bounds.xPercentage * screenSize.width + width / 2) - 50
-                let y = focusedScreen.frame.origin.y + (bounds.yPercentage * screenSize.height + height / 2) - 50
-                
-                if mouseLocation.x > x && mouseLocation.x < x + 100 && mouseLocation.y > y && mouseLocation.y < y + 100 {
-                    hoveredSectionWindow = sectionWindow
+            for cs in cachedSectionGeometries {
+                if cs.centerHitRect.contains(mouseLocation) {
+                    hoveredSectionWindow = cs.window
                     break
                 }
             }
         }
-        
+
         if hoveredSectionWindow == nil {
-            let sortedSectionWindows: [SectionWindow]
-            
+            let sorted: [CachedSectionGeometry]
             if appSettings.snapHighlightStrategy == .centerProximity {
-                sortedSectionWindows = userLayouts.currentLayout.layoutWindow.sectionWindows.sorted {
-                    let screenSize = focusedScreen.frame
-                    let screenOrigin = focusedScreen.frame.origin
-                    
-                    let bounds1 = $0.getBounds(for: focusedScreen)
-                    let center1X = screenOrigin.x + bounds1.xPercentage * screenSize.width + (bounds1.widthPercentage * screenSize.width) / 2
-                    let center1Y = screenOrigin.y + bounds1.yPercentage * screenSize.height + (bounds1.heightPercentage * screenSize.height) / 2
-                    let distance1 = sqrt(pow(mouseLocation.x - center1X, 2) + pow(mouseLocation.y - center1Y, 2))
-                    
-                    let bounds2 = $1.getBounds(for: focusedScreen)
-                    let center2X = screenOrigin.x + bounds2.xPercentage * screenSize.width + (bounds2.widthPercentage * screenSize.width) / 2
-                    let center2Y = screenOrigin.y + bounds2.yPercentage * screenSize.height + (bounds2.heightPercentage * screenSize.height) / 2
-                    let distance2 = sqrt(pow(mouseLocation.x - center2X, 2) + pow(mouseLocation.y - center2Y, 2))
-                    
-                    return distance1 < distance2
+                sorted = cachedSectionGeometries.sorted {
+                    let dx1 = mouseLocation.x - $0.center.x
+                    let dy1 = mouseLocation.y - $0.center.y
+                    let dx2 = mouseLocation.x - $1.center.x
+                    let dy2 = mouseLocation.y - $1.center.y
+                    return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
                 }
             } else {
-                sortedSectionWindows = userLayouts.currentLayout.layoutWindow.sectionWindows.sorted {
-                    let frame1 = $0.window.frame
-                    let frame2 = $1.window.frame
-                    return (frame1.width * frame1.height) < (frame2.width * frame2.height)
-                }
+                sorted = cachedSectionGeometries.sorted { $0.area < $1.area }
             }
-            
-            for sectionWindow in sortedSectionWindows {
-                let screenSize = focusedScreen.frame
-                let screenOrigin = focusedScreen.frame.origin
-                let bounds = sectionWindow.getBounds(for: focusedScreen)
-                let width = bounds.widthPercentage * screenSize.width
-                let height = bounds.heightPercentage * screenSize.height
-                let x = screenOrigin.x + bounds.xPercentage * screenSize.width
-                let y = screenOrigin.y + bounds.yPercentage * screenSize.height
-                
-                if mouseLocation.x > x && mouseLocation.x < x + width && mouseLocation.y > y && mouseLocation.y < y + height {
-                    hoveredSectionWindow = sectionWindow
+
+            for cs in sorted {
+                if cs.rect.contains(mouseLocation) {
+                    hoveredSectionWindow = cs.window
                     break
                 }
             }
         }
     }
 
-    for sectionWindow in userLayouts.currentLayout.layoutWindow.sectionWindows {
-        sectionWindow.isHovered = (sectionWindow === hoveredSectionWindow)
+    for sectionWindow in sectionWindows {
+        let shouldHover = (sectionWindow === hoveredSectionWindow)
+        if sectionWindow.isHovered != shouldHover {
+            sectionWindow.isHovered = shouldHover
+        }
     }
-    
+
     if let hoveredSectionWindow = hoveredSectionWindow {
         hoveredSectionWindow.window.orderFront(nil)
     }
-    
+
     return hoveredSectionWindow
 }
 
