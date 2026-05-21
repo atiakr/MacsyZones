@@ -856,61 +856,141 @@ func resizeWindow(element: AXUIElement, newSize: CGSize) {
     }
 }
 
+/// Scan one app's AX window list and return the first window matching `predicate`.
+/// Returns nil if the app exposes no windows or AX denies the query.
+fileprivate func findAXWindowInApp(pid: pid_t, matching predicate: (AXUIElement) -> Bool) -> AXUIElement? {
+    let appElement = AXUIElementCreateApplication(pid)
+    var windowListRef: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowListRef)
+    guard result == .success, let windowList = windowListRef as? [AXUIElement] else {
+        return nil
+    }
+    return windowList.first(where: predicate)
+}
+
 func retrieveFreshWindowElement(for windowId: UInt32) -> AXUIElement? {
     debugLog("Attempting to retrieve fresh window element for window ID: \(windowId)")
-    
+
+    let matchesWindowId: (AXUIElement) -> Bool = { window in
+        getWindowID(from: window) == windowId
+    }
+
+    // Fast path: ask CGWindowList who owns this CGWindowID, then probe only that app.
+    if let infoList = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowId) as? [[String: Any]],
+       let info = infoList.first,
+       let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t,
+       let element = findAXWindowInApp(pid: ownerPid, matching: matchesWindowId) {
+        debugLog("Successfully retrieved fresh window element via owner pid for window ID: \(windowId)")
+        return element
+    }
+
+    // Fallback: scan every running app (CGWindowList lookup can fail for
+    // off-screen / suspended windows).
     let runningApps = NSWorkspace.shared.runningApplications.filter {
         $0.activationPolicy == .regular
     }
-    
     for app in runningApps {
-        let pid = app.processIdentifier as pid_t
-        let appElement = AXUIElementCreateApplication(pid)
-        
-        var windowListRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowListRef)
-        
-        if result != .success { continue }
-        
-        guard let windowList = windowListRef as? [AXUIElement] else { continue }
-        
-        for window in windowList {
-            if let currentWindowId = getWindowID(from: window), currentWindowId == windowId {
-                debugLog("Successfully retrieved fresh window element for window ID: \(windowId)")
-                return window
-            }
+        if let element = findAXWindowInApp(pid: app.processIdentifier, matching: matchesWindowId) {
+            debugLog("Successfully retrieved fresh window element via full scan for window ID: \(windowId)")
+            return element
         }
     }
-    
+
     debugLog("Failed to retrieve fresh window element for window ID: \(windowId)")
-    
+    return nil
+}
+
+fileprivate func pickClosestCandidate(
+    _ candidates: [(element: AXUIElement, windowId: UInt32, position: CGPoint?)],
+    approximatePosition: CGPoint?
+) -> (element: AXUIElement, windowId: UInt32, position: CGPoint?)? {
+    if candidates.isEmpty { return nil }
+    guard let approximatePosition = approximatePosition else { return candidates.first }
+    return candidates.min { c1, c2 in
+        guard let p1 = c1.position, let p2 = c2.position else {
+            return c1.position != nil
+        }
+        let dx1 = p1.x - approximatePosition.x
+        let dy1 = p1.y - approximatePosition.y
+        let dx2 = p2.x - approximatePosition.x
+        let dy2 = p2.y - approximatePosition.y
+        return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
+    }
+}
+
+fileprivate func resolveAXWindow(
+    pid: pid_t,
+    expectedWindowId: UInt32,
+    expectedTitle: String
+) -> (element: AXUIElement, windowId: UInt32)? {
+    let appElement = AXUIElementCreateApplication(pid)
+    var windowListRef: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowListRef)
+    guard result == .success, let windowList = windowListRef as? [AXUIElement] else {
+        return nil
+    }
+    for window in windowList {
+        guard let windowId = getWindowID(from: window), windowId == expectedWindowId else { continue }
+        var titleValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
+        guard let windowTitle = titleValue as? String, windowTitle == expectedTitle else { continue }
+        return (window, windowId)
+    }
     return nil
 }
 
 func retrieveFreshWindowElementByTitle(title: String, approximatePosition: CGPoint? = nil) -> (element: AXUIElement, windowId: UInt32)? {
     debugLog("Attempting to retrieve fresh window element by title: \(title)")
-    
+
+    // Fast path: filter CGWindowList by title (kCGWindowName) and probe only owning apps.
+    // kCGWindowName may be nil without Screen Recording permission; we fall through then.
+    if let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
+        var owners: [(pid: pid_t, windowId: UInt32, position: CGPoint?)] = []
+        for info in infoList {
+            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 { continue }
+            guard let cgName = info[kCGWindowName as String] as? String, cgName == title,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let windowId = info[kCGWindowNumber as String] as? UInt32 else { continue }
+
+            var position: CGPoint?
+            if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+               let x = bounds["X"], let y = bounds["Y"] {
+                position = CGPoint(x: x, y: y)
+            }
+            owners.append((pid, windowId, position))
+        }
+
+        if !owners.isEmpty {
+            var resolved: [(element: AXUIElement, windowId: UInt32, position: CGPoint?)] = []
+            for owner in owners {
+                if let match = resolveAXWindow(pid: owner.pid, expectedWindowId: owner.windowId, expectedTitle: title) {
+                    resolved.append((match.element, match.windowId, owner.position))
+                }
+            }
+            if let pick = pickClosestCandidate(resolved, approximatePosition: approximatePosition) {
+                debugLog("Successfully retrieved fresh window element by title via CGWindowList for: \(title)")
+                return (pick.element, pick.windowId)
+            }
+        }
+    }
+
+    // Fallback: full AX scan (e.g. when Screen Recording perm is missing or
+    // CGWindowName lags the AX title).
     let runningApps = NSWorkspace.shared.runningApplications.filter {
         $0.activationPolicy == .regular
     }
-    
     var candidates: [(element: AXUIElement, windowId: UInt32, position: CGPoint?)] = []
-    
     for app in runningApps {
         let pid = app.processIdentifier as pid_t
         let appElement = AXUIElementCreateApplication(pid)
-        
         var windowListRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowListRef)
-        
         if result != .success { continue }
-        
         guard let windowList = windowListRef as? [AXUIElement] else { continue }
-        
+
         for window in windowList {
             var titleValue: CFTypeRef?
             AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
-            
             if let windowTitle = titleValue as? String, windowTitle == title {
                 if let windowId = getWindowID(from: window) {
                     var positionRef: CFTypeRef?
@@ -920,36 +1000,18 @@ func retrieveFreshWindowElementByTitle(title: String, approximatePosition: CGPoi
                         AXValueGetValue(positionRef as! AXValue, AXValueType.cgPoint, &position)
                         windowPosition = position
                     }
-                    
-                    candidates.append((element: window, windowId: windowId, position: windowPosition))
+                    candidates.append((window, windowId, windowPosition))
                 }
             }
         }
     }
-    
-    if let approximatePosition = approximatePosition, !candidates.isEmpty {
-        let closest = candidates.min { candidate1, candidate2 in
-            guard let pos1 = candidate1.position, let pos2 = candidate2.position else {
-                return candidate1.position != nil
-            }
-            let dist1 = sqrt(pow(pos1.x - approximatePosition.x, 2) + pow(pos1.y - approximatePosition.y, 2))
-            let dist2 = sqrt(pow(pos2.x - approximatePosition.x, 2) + pow(pos2.y - approximatePosition.y, 2))
-            return dist1 < dist2
-        }
-        
-        if let match = closest {
-            debugLog("Successfully retrieved fresh window element by title and position for: \(title)")
-            return (element: match.element, windowId: match.windowId)
-        }
+
+    if let pick = pickClosestCandidate(candidates, approximatePosition: approximatePosition) {
+        debugLog("Successfully retrieved fresh window element by title via full scan for: \(title)")
+        return (pick.element, pick.windowId)
     }
-    
-    if let first = candidates.first {
-        debugLog("Successfully retrieved fresh window element by title for: \(title)")
-        return (element: first.element, windowId: first.windowId)
-    }
-    
+
     debugLog("Failed to retrieve fresh window element by title: \(title)")
-    
     return nil
 }
 
