@@ -1883,9 +1883,9 @@ class SnapResizer: NSWindow {
         draggedOnce = true
         
         guard let focusedScreen = getFocusedScreen() else { return }
-        let focusedScreenNumber = getScreenNumber(screen: focusedScreen)
-        
-        debugLog("SnapResizer.mouseDragged(): focusedScreen: \(focusedScreen), number: \(getScreenNumber(screen: focusedScreen) ?? -1)")
+        let focusedScreenId = getScreenId(screen: focusedScreen)
+
+        debugLog("SnapResizer.mouseDragged(): focusedScreen: \(focusedScreen), id: \(focusedScreenId ?? "?")")
         
         resizerX += event.deltaX
         resizerY -= event.deltaY
@@ -1929,25 +1929,26 @@ class SnapResizer: NSWindow {
         }
         
         resizeTask?.cancel()
-        
-        resizeTask = DispatchWorkItem {
+
+        // [weak self] 로 self.resizeTask ← closure ← self 강참조 사이클 차단.
+        // SnapResizer 인스턴스가 화면 변경 등으로 해제될 때 누수되지 않도록 함.
+        resizeTask = DispatchWorkItem { [weak self] in
+            guard let self else { return }
             var mouseUpTaskParam: MouseUpTaskParam = []
 
             for relatedSection in self.relatedSections {
-                for (windowId, sectionNumber) in PlacedWindows.windows {
+                let sectionWindow = relatedSection.sectionWindow
+                let candidates = PlacedWindows.bySection[sectionWindow.number] ?? []
+                for windowId in candidates {
                     guard let element = PlacedWindows.elements[windowId] else { continue }
-                    
-                    let sectionWindow = relatedSection.sectionWindow
-                    
-                    if sectionWindow.number != sectionNumber { continue }
                     if PlacedWindows.layouts[windowId] != relatedSection.sectionWindow.layoutWindow.name { continue }
-                    
-                    guard let screenNumber = PlacedWindows.screens[windowId] else { continue }
 
-                    debugLog("resizerTask: screenNumber: \(screenNumber), focusedScreenNumber: \(focusedScreenNumber ?? -1)")
-                    
-                    if focusedScreenNumber != screenNumber {
-                        guard let screen = resolveScreen(screenNumber: screenNumber) else { continue }
+                    guard let screenId = PlacedWindows.screens[windowId] else { continue }
+
+                    debugLog("resizerTask: screenId: \(screenId), focusedScreenId: \(focusedScreenId ?? "?")")
+
+                    if focusedScreenId != screenId {
+                        guard let screen = resolveScreen(screenId: screenId) else { continue }
                         
                         let sectionConfig = sectionWindow.sectionConfig.getUpdated(for: sectionWindow.window, on: focusedScreen)
                         

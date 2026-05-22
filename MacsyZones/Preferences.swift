@@ -14,6 +14,12 @@ import Foundation
 import Cocoa
 
 struct ScreenSpacePair: Hashable, Codable {
+    let screen: String
+    let space: Int
+}
+
+/// 구버전(Int 스크린 인덱스) 포맷. 현재 디스플레이 구성과 같은 머신에 한해 1회 마이그레이션에만 사용.
+private struct LegacyScreenSpacePair: Hashable, Codable {
     let screen: Int
     let space: Int
 }
@@ -26,56 +32,53 @@ class SpaceLayoutPreferences: UserData {
         super.init(name: name, data: data, fileName: fileName)
     }
 
-    func set(screenNumber: Int, spaceNumber: Int, layoutName: String) {
-        spaces[ScreenSpacePair(screen: screenNumber, space: spaceNumber)] = layoutName
+    func set(screenId: String, spaceNumber: Int, layoutName: String) {
+        spaces[ScreenSpacePair(screen: screenId, space: spaceNumber)] = layoutName
         save()
     }
 
-    func get(screenNumber: Int, spaceNumber: Int) -> String? {
-        let name = spaces[ScreenSpacePair(screen: screenNumber, space: spaceNumber)]
-        
+    func get(screenId: String, spaceNumber: Int) -> String? {
+        let name = spaces[ScreenSpacePair(screen: screenId, space: spaceNumber)]
+
         if name == nil {
             return nil
         }
-        
+
         if !userLayouts.layouts.keys.contains(name!) {
-            return userLayouts.layouts.values.first?.name
+            return userLayouts.layouts.keys.sorted().first
         }
-        
+
         return name
     }
 
     func setCurrent(layoutName: String) {
-        guard let (screenNumber, spaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() else {
+        guard let (screenId, spaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() else {
             debugLog("Unable to get the current screen and space")
             return
         }
 
-        set(screenNumber: screenNumber, spaceNumber: spaceNumber, layoutName: layoutName)
+        set(screenId: screenId, spaceNumber: spaceNumber, layoutName: layoutName)
     }
 
     func getCurrent() -> String? {
-        guard let (screenNumber, spaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() else {
+        guard let (screenId, spaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() else {
             debugLog("Unable to get the current screen and space")
             return nil
         }
 
-        debugLog("Getting layout for screen \(screenNumber) and space \(spaceNumber)")
+        debugLog("Getting layout for screen \(screenId) and space \(spaceNumber)")
 
-        return get(screenNumber: screenNumber, spaceNumber: spaceNumber)
+        return get(screenId: screenId, spaceNumber: spaceNumber)
     }
 
-    static func getCurrentScreenAndSpace() -> (Int, Int)? {
+    static func getCurrentScreenAndSpace() -> (String, Int)? {
         guard let focusedScreen = getFocusedScreen() else { return nil }
-
-        let screenIndex = getScreenNumber(screen: focusedScreen)
-
-        guard let screenIndex else { return nil }
+        guard let screenId = getScreenId(screen: focusedScreen) else { return nil }
         guard let spaceNumber = getCurrentSpaceNumber() else { return nil }
 
-        debugLog("getCurrentScreenAndSpace(): screenIndex: \(screenIndex), spaceNumber: \(spaceNumber)")
+        debugLog("getCurrentScreenAndSpace(): screenId: \(screenId), spaceNumber: \(spaceNumber)")
 
-        return (screenIndex, spaceNumber)
+        return (screenId, spaceNumber)
     }
 
     static func getCurrentSpaceNumber() -> Int? {
@@ -127,14 +130,34 @@ class SpaceLayoutPreferences: UserData {
 
     override func load() {
         super.load()
-        do {
-            if let jsonData = data.data(using: .utf8) {
-                spaces = try JSONDecoder().decode([ScreenSpacePair: String].self, from: jsonData)
-                debugLog("Preferences loaded successfully.")
-            }
-        } catch {
-            debugLog("Error loading SpaceLayoutPreferences: \(error)")
+        guard let jsonData = data.data(using: .utf8) else { return }
+
+        // 1) 현재 포맷(String screenId 키) 으로 시도.
+        if let parsed = try? JSONDecoder().decode([ScreenSpacePair: String].self, from: jsonData) {
+            spaces = parsed
+            debugLog("Preferences loaded successfully (current format, \(parsed.count) entries).")
+            return
         }
+
+        // 2) 구버전(Int 스크린 인덱스 키) 포맷이면 현재 디스플레이 구성에 한해 1회 마이그레이션.
+        //    같은 머신에서 같은 모니터 세팅을 쓰던 사용자는 설정을 보존할 수 있다.
+        //    매핑 불가능한 인덱스(다른 머신, 모니터 갯수 변경 등)는 그냥 누락 — 사용자가 다시 지정하면 됨.
+        if let legacy = try? JSONDecoder().decode([LegacyScreenSpacePair: String].self, from: jsonData) {
+            let screens = ScreenCache.screens
+            var migrated: [ScreenSpacePair: String] = [:]
+            for (key, value) in legacy {
+                guard key.screen >= 0, key.screen < screens.count,
+                      let screenId = getScreenId(screen: screens[key.screen]) else { continue }
+                migrated[ScreenSpacePair(screen: screenId, space: key.space)] = value
+            }
+            spaces = migrated
+            debugLog("SpaceLayoutPreferences: migrated \(migrated.count)/\(legacy.count) legacy entries.")
+            save()  // 마이그레이션 결과를 새 포맷으로 즉시 영속화.
+            return
+        }
+
+        spaces = [:]
+        debugLog("SpaceLayoutPreferences: unrecognized format; clearing.")
     }
     
     func switchToCurrent() {

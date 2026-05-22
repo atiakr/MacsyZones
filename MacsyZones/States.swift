@@ -54,25 +54,39 @@ class PlacedWindows {
     static var elements: [UInt32: AXUIElement] = [:]
     static var layouts: [UInt32: String] = [:]
     static var workspaces: [UInt32: Int] = [:]
-    static var screens: [UInt32: Int] = [:]
-    
-    static func place(windowId: UInt32, screenNumber: Int, workspaceNumber: Int, layoutName: String, sectionNumber: Int, element: AXUIElement) {
+    static var screens: [UInt32: String] = [:]
+    /// 섹션 번호 → 그 섹션에 배치된 윈도우 ID 집합. snap resizer 가 매 드래그마다
+    /// 전체 배치 윈도우를 순회하는 O(N) 비용을 O(matching) 으로 줄이기 위한 역인덱스.
+    static var bySection: [Int: Set<UInt32>] = [:]
+
+    static func place(windowId: UInt32, screenId: String, workspaceNumber: Int, layoutName: String, sectionNumber: Int, element: AXUIElement) {
+        if let oldSection = windows[windowId], oldSection != sectionNumber {
+            bySection[oldSection]?.remove(windowId)
+            if bySection[oldSection]?.isEmpty == true { bySection.removeValue(forKey: oldSection) }
+        }
+        bySection[sectionNumber, default: []].insert(windowId)
+
         windows[windowId] = sectionNumber
         elements[windowId] = element
         layouts[windowId] = layoutName
-        screens[windowId] = screenNumber
+        screens[windowId] = screenId
         workspaces[windowId] = workspaceNumber
-        
+
         donationReminder.count()
     }
-    
+
     static func unplace(windowId: UInt32) {
+        if let oldSection = windows[windowId] {
+            bySection[oldSection]?.remove(windowId)
+            if bySection[oldSection]?.isEmpty == true { bySection.removeValue(forKey: oldSection) }
+        }
+
         windows.removeValue(forKey: windowId)
         elements.removeValue(forKey: windowId)
         layouts.removeValue(forKey: windowId)
         screens.removeValue(forKey: windowId)
         workspaces.removeValue(forKey: windowId)
-        
+
         donationReminder.count()
     }
     
