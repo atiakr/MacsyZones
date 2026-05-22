@@ -14,9 +14,11 @@ import Foundation
 import SwiftUI
 import AppKit
 
-func debugLog(_ message: String, file: String = #file, line: Int = #line) {
+/// `@autoclosure` 로 인자 평가를 지연시켜 Release 에선 string interpolation 비용이 0.
+/// 드래그/AX 콜백 핫패스에서 매 프레임 일어나던 string 할당이 사라짐.
+func debugLog(_ message: @autoclosure () -> String, file: String = #file, line: Int = #line) {
     #if DEBUG
-        print("[\(URL(fileURLWithPath: file).lastPathComponent):\(line)] \(message)")
+        print("[\(URL(fileURLWithPath: file).lastPathComponent):\(line)] \(message())")
     #endif
 }
 
