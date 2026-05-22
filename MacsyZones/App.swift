@@ -50,6 +50,7 @@ var mouseUpMonitor: Any?
 var mouseDownMonitor: Any?
 var mouseDragMonitor: Any?
 var rightClickMonitor: Any?
+var shortcutMonitor: Any?
 
 var isPreview: Bool {
     return ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
@@ -91,47 +92,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
         
         Thread { [self] in
             let apps = NSWorkspace.shared.runningApplications
-            
+
             for app in apps {
                 let pid = app.processIdentifier
-                let element = AXUIElementCreateApplication(pid)
-
-                var windowListRef: CFTypeRef?
-                let result = AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowListRef)
-                guard result == .success,
-                      let windowListRef = windowListRef,
-                      CFGetTypeID(windowListRef) == CFArrayGetTypeID(),
-                      let windowList = (windowListRef as! CFArray) as? [AXUIElement]
-                else { continue }
 
                 // 앱당 MainActor Task 하나로 묶어 app-level + 윈도우 관찰을 일괄 등록.
                 // 원본은 윈도우마다 Task를 만들어 시작 시 수백 개가 큐잉되던 문제가 있었음.
                 Task { @MainActor in
-                    startObserving(pid: pid)
-                    for window in windowList {
-                        var titleValue: CFTypeRef?
-                        AXUIElementCopyAttributeValue(window,
-                                                      kAXTitleAttribute as CFString,
-                                                      &titleValue)
-
-                        if let title = titleValue as? String, !title.isEmpty {
-                            debugLog("Window is being observed: \(title)")
-                        }
-
-                        startObserving(pid: pid, element: window)
-                    }
+                    observeAppAndWindows(pid: pid)
                 }
             }
-            
+
             debugLog("All apps are being observed for window movement.")
-            
+
+            // 새로 실행되는 앱: app-level 옵저버 + (이미 떠 있는) 윈도우 enumerate.
+            // 런치 직후엔 윈도우가 0 일 수 있는데, app 레벨 kAXWindowCreatedNotification 이
+            // 잡아서 onObserverNotification 에서 새 창을 관찰 큐에 추가한다.
             NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
                                                               object: nil, queue: nil) { notification in
                 if let userInfo = notification.userInfo,
                    let launchedApp = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
                     debugLog("Newly launched app is being observed: \(launchedApp)")
+                    let pid = launchedApp.processIdentifier
                     Task { @MainActor in
-                        self.startObserving(pid: launchedApp.processIdentifier)
+                        observeAppAndWindows(pid: pid)
+                    }
+                }
+            }
+
+            // 종료된 앱: 보유 중이던 AXObserver 해제 (메모리/IPC 누수 방지).
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
+                                                              object: nil, queue: nil) { notification in
+                if let userInfo = notification.userInfo,
+                   let terminatedApp = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                    let pid = terminatedApp.processIdentifier
+                    Task { @MainActor in
+                        releaseAXObservers(for: pid)
+                        cleanupPlacedWindowsAgainstSystem()
                     }
                 }
             }
@@ -356,44 +353,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
         spaceLayoutPreferences.switchToCurrent()
     }
     
-    func startObserving(pid: pid_t, element: AXUIElement? = nil) {
-        var result: AXError
-        let toObserveElement: AXUIElement
-        
-        if element == nil {
-            toObserveElement = AXUIElementCreateApplication(pid)
-        } else {
-            toObserveElement = element!
-        }
-        
-        let observerPtr: UnsafeMutablePointer<AXObserver?> = UnsafeMutablePointer<AXObserver?>.allocate(capacity: 1)
-        defer { observerPtr.deallocate() }
-        
-        result = AXObserverCreate(pid, onObserverNotification, observerPtr)
-        guard result == .success else {
-            debugLog("Failed to create observer: \(result)")
-            return
-        }
-        
-        let observer = observerPtr.pointee!
-        
-        result = AXObserverAddNotification(observer, toObserveElement, kAXWindowMovedNotification as CFString, nil)
-        guard result == .success else {
-            return
-        }
-        
-        result = AXObserverAddNotification(observer, toObserveElement, kAXUIElementDestroyedNotification as CFString, nil)
-        guard result == .success else { return }
-        
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
-    }
-    
     func monitorShortcuts() {
         var modifierKeyTask: DispatchWorkItem?
         var snapKeyUsed = false
         var prevFlags = NSEvent.ModifierFlags()
-        
-        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+
+        // 반환 토큰을 전역에 저장해 applicationWillTerminate 의 일괄 정리 루프에 포함되도록 한다.
+        // 470eef1 에서 마우스 모니터들은 잡혔는데 여기만 누락돼 있었던 부분 동기화.
+        shortcutMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             if !macsyReady.isReady { return }
             var modifierKey: NSEvent.ModifierFlags = .control
             
@@ -523,7 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     
     func applicationWillTerminate(_ notification: Notification) {
         appSettings.flushPendingSave()
-        for monitor in [mouseDownMonitor, mouseDragMonitor, mouseUpMonitor, rightClickMonitor] {
+        for monitor in [mouseDownMonitor, mouseDragMonitor, mouseUpMonitor, rightClickMonitor, shortcutMonitor] {
             if let monitor = monitor {
                 NSEvent.removeMonitor(monitor)
             }

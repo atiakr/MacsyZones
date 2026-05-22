@@ -47,6 +47,15 @@ class OriginalWindowProperties {
     static func getWindowPosition(for windowID: UInt32) -> CGPoint? {
         return windowPositionMap[windowID]
     }
+
+    /// 시스템에 더 이상 존재하지 않는 windowID 들을 일괄 제거.
+    /// AX destroyed 알림이 발생했을 때 cleanupPlacedWindowsAgainstSystem 에서 호출.
+    static func purgeStale(liveIds: Set<UInt32>) {
+        for id in Array(windowSizeMap.keys) where !liveIds.contains(id) {
+            windowSizeMap.removeValue(forKey: id)
+            windowPositionMap.removeValue(forKey: id)
+        }
+    }
 }
 
 class PlacedWindows {

@@ -210,20 +210,116 @@ func getWindowID(from axElement: AXUIElement) -> UInt32? {
     }
 }
 
+/// AXObserver 인스턴스를 함수 스코프를 넘어 살려두기 위한 보유 컨테이너.
+/// AXObserverCreate 는 +1 retained 로 돌려주지만, CFRunLoop 는 RunLoopSource 만
+/// retain 할 뿐 AXObserver 본체 retain 을 문서적으로 보장하지 않는다.
+/// 시간이 지나면 일부 앱의 알림이 끊기던 증상이 여기서 비롯되므로 명시적으로 잡는다.
+@MainActor
+private var retainedAXObservers: [pid_t: [AXObserver]] = [:]
+
+/// 한 pid 에 대해 (element 가 nil 이면 app 엘리먼트) AXObserver 를 만들고
+/// move/destroyed 알림을 등록한다. app 레벨 호출 시에는 새 창 생성도 함께 잡는다.
+@MainActor
+func startObservingAXEvents(pid: pid_t, element: AXUIElement? = nil) {
+    let toObserveElement: AXUIElement = element ?? AXUIElementCreateApplication(pid)
+
+    let observerPtr: UnsafeMutablePointer<AXObserver?> = UnsafeMutablePointer<AXObserver?>.allocate(capacity: 1)
+    defer { observerPtr.deallocate() }
+
+    var result = AXObserverCreate(pid, onObserverNotification, observerPtr)
+    guard result == .success, let observer = observerPtr.pointee else {
+        debugLog("Failed to create observer: \(result)")
+        return
+    }
+
+    result = AXObserverAddNotification(observer, toObserveElement, kAXWindowMovedNotification as CFString, nil)
+    guard result == .success else { return }
+
+    result = AXObserverAddNotification(observer, toObserveElement, kAXUIElementDestroyedNotification as CFString, nil)
+    guard result == .success else { return }
+
+    if element == nil {
+        // app 레벨에서만 의미가 있는 알림 — 새 창이 열리면 콜백에서 그 창을 관찰 대상에 추가.
+        _ = AXObserverAddNotification(observer, toObserveElement, kAXWindowCreatedNotification as CFString, nil)
+    }
+
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+
+    retainedAXObservers[pid, default: []].append(observer)
+}
+
+/// 한 앱 (pid) 에 대해 app 레벨 + 현재 살아있는 모든 윈도우를 관찰한다.
+@MainActor
+func observeAppAndWindows(pid: pid_t) {
+    startObservingAXEvents(pid: pid)
+
+    let appElement = AXUIElementCreateApplication(pid)
+    var windowListRef: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowListRef)
+    guard result == .success,
+          let windowListRef = windowListRef,
+          CFGetTypeID(windowListRef) == CFArrayGetTypeID(),
+          let windowList = (windowListRef as! CFArray) as? [AXUIElement]
+    else { return }
+
+    for window in windowList {
+        startObservingAXEvents(pid: pid, element: window)
+    }
+}
+
+@MainActor
+func releaseAXObservers(for pid: pid_t) {
+    retainedAXObservers.removeValue(forKey: pid)
+}
+
+/// AX 알림에서 destroyed 가 들어왔을 때 호출. element 가 이미 dead 라 직접 id 추출이
+/// 불가능하므로 CGWindowList 의 살아있는 ID 집합과 비교해 PlacedWindows /
+/// OriginalWindowProperties 의 stale 항목을 일괄 청소한다.
+func cleanupPlacedWindowsAgainstSystem() {
+    guard let infoList = CGWindowListCopyWindowInfo([], kCGNullWindowID) as? [[String: Any]] else { return }
+    let liveIds = Set(infoList.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
+
+    for windowId in Array(PlacedWindows.windows.keys) where !liveIds.contains(windowId) {
+        PlacedWindows.unplace(windowId: windowId)
+    }
+    OriginalWindowProperties.purgeStale(liveIds: liveIds)
+}
+
 func onObserverNotification(observer: AXObserver, element: AXUIElement, notification: CFString, refcon: UnsafeMutableRawPointer?) {
+    let notif = notification as String
+
+    // destroyed/created 는 element 가 dead 이거나 갓 태어난 상태라
+    // role 읽기가 실패할 수 있으므로 role 체크보다 먼저, 그리고 isEditing/isSnapResizing
+    // 게이트보다도 앞에서 처리한다 (편집 중에도 청소·관찰은 유지돼야 한다).
+    if notif == kAXUIElementDestroyedNotification as String {
+        cleanupPlacedWindowsAgainstSystem()
+        return
+    }
+
+    if notif == kAXWindowCreatedNotification as String {
+        var pid: pid_t = 0
+        if AXUIElementGetPid(element, &pid) == .success {
+            let newWindow = element
+            Task { @MainActor in
+                startObservingAXEvents(pid: pid, element: newWindow)
+            }
+        }
+        return
+    }
+
     if isEditing { return }
     if isSnapResizing { return }
-    
+
     var result: AXError
-    
+
     var roleRef: CFTypeRef?
     result = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
     let role = roleRef as? String ?? "Unknown"
-    
+
     if role != kAXWindowRole {
         return
     }
-    
+
     var appRef: CFTypeRef?
     result = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &appRef)
     guard result == .success,
@@ -238,8 +334,7 @@ func onObserverNotification(observer: AXObserver, element: AXUIElement, notifica
     AXUIElementCopyAttributeValue(appElement, kAXTitleAttribute as CFString, &titleRef)
     let title = (titleRef as? String) ?? ""
 
-    switch notification as String {
-    case kAXWindowMovedNotification:
+    if notif == kAXWindowMovedNotification as String {
         var position: CGPoint = .zero
         var positionRef: CFTypeRef?
         result = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef)
@@ -251,12 +346,6 @@ func onObserverNotification(observer: AXObserver, element: AXUIElement, notifica
         }
 
         onWindowMoved(observer: observer, element: element, notification: notification, title: title, position: position)
-
-    case kAXUIElementDestroyedNotification:
-        debugLog("App exited: \(title)")
-
-    default:
-        break
     }
 }
 
