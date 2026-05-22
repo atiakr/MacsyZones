@@ -15,6 +15,7 @@ import ApplicationServices
 import SwiftUI
 import Accessibility
 import CoreGraphics
+import QuartzCore
 
 var userLayouts: UserLayouts = .init()
 var layoutSwitcherPanel: LayoutSwitcherPanel = .init()
@@ -285,7 +286,12 @@ struct CachedSectionGeometry {
 }
 
 var cachedSectionGeometries: [CachedSectionGeometry] = []
+/// area 오름차순 사전 정렬 사본. snapHighlightStrategy != .centerProximity 경로에서
+/// 마우스 무브당 발생하던 `sorted` 할당을 제거.
+var cachedSectionGeometriesByArea: [CachedSectionGeometry] = []
 var cachedSectionGeometriesKey: (layoutName: String, screenId: ObjectIdentifier, signature: CGFloat, count: Int)?
+/// 직전 hover 와 동일하면 `orderFront(nil)` (윈도서버 IPC) 생략.
+var lastHoveredSectionWindow: SectionWindow?
 
 func getHoveredSectionWindow() -> SectionWindow? {
     debugLog("getHoveredSectionWindow(): isFitting = \(isFitting)")
@@ -345,6 +351,7 @@ func getHoveredSectionWindow() -> SectionWindow? {
                     area: width * height
                 )
             }
+            cachedSectionGeometriesByArea = cachedSectionGeometries.sorted { $0.area < $1.area }
             cachedSectionGeometriesKey = (currentLayoutName, screenId, signature, sectionWindows.count)
         }
 
@@ -360,6 +367,7 @@ func getHoveredSectionWindow() -> SectionWindow? {
         if hoveredSectionWindow == nil {
             let sorted: [CachedSectionGeometry]
             if appSettings.snapHighlightStrategy == .centerProximity {
+                // centerProximity 는 마우스 위치 의존이라 매 호출 재정렬이 불가피.
                 sorted = cachedSectionGeometries.sorted {
                     let dx1 = mouseLocation.x - $0.center.x
                     let dy1 = mouseLocation.y - $0.center.y
@@ -368,7 +376,8 @@ func getHoveredSectionWindow() -> SectionWindow? {
                     return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
                 }
             } else {
-                sorted = cachedSectionGeometries.sorted { $0.area < $1.area }
+                // area 정렬은 cache rebuild 때 이미 완료됨 — sort 할당 0.
+                sorted = cachedSectionGeometriesByArea
             }
 
             for cs in sorted {
@@ -388,8 +397,11 @@ func getHoveredSectionWindow() -> SectionWindow? {
     }
 
     if let hoveredSectionWindow = hoveredSectionWindow {
-        hoveredSectionWindow.window.orderFront(nil)
+        if lastHoveredSectionWindow !== hoveredSectionWindow {
+            hoveredSectionWindow.window.orderFront(nil)
+        }
     }
+    lastHoveredSectionWindow = hoveredSectionWindow
 
     return hoveredSectionWindow
 }
@@ -442,8 +454,10 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
     windowMovingOnScreen = getFocusedScreen()
     
     if appSettings.shakeToSnap && !isSwitcherUsed {
-        let currentTime = Date().timeIntervalSince1970
-        
+        // CACurrentMediaTime() 사용: Date() 알로케이션 + gettimeofday 없이 mach 단조시계.
+        // 모든 shake/previous 타임스탬프가 같은 시계여야 하므로 onMouseUp 도 동일하게 사용.
+        let currentTime = CACurrentMediaTime()
+
         if lastShakeClearTime + shakeClearInterval >= currentTime {
             lastShakeTime = currentTime
             shakeMagnitudeCount = 0
@@ -516,10 +530,10 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
         }
         
         if let startPosition = placedWindowMoveStartPosition {
-            let distanceMoved = sqrt(pow(position.x - startPosition.x, 2) +
-                                     pow(position.y - startPosition.y, 2))
-            
-            if distanceMoved > 10 {
+            // 제곱 비교로 sqrt/pow 제거 — onWindowMoved 매 AX 알림마다 호출되는 핫패스.
+            let dx = position.x - startPosition.x
+            let dy = position.y - startPosition.y
+            if (dx * dx + dy * dy) > 100 {
                 placedWindowMoveStartPosition = nil
                 PlacedWindows.unplace(windowId: windowId)
                 
@@ -562,7 +576,7 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
         guard !isSnapKeyPressed else { return }
         
         let dependingPosition = NSEvent.mouseLocation
-        let currentTime = Date().timeIntervalSince1970
+        let currentTime = CACurrentMediaTime()
 
         if let previousPosition = previousPosition, let previousTime = previousTime {
             let deltaTime = currentTime - previousTime
@@ -575,9 +589,12 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
                 
                 let deltaVelocity = CGPoint(x: currentVelocity.x - previousVelocity.x, y: currentVelocity.y - previousVelocity.y)
                 let acceleration = CGPoint(x: deltaVelocity.x / CGFloat(deltaTime), y: deltaVelocity.y / CGFloat(deltaTime))
-                let accelerationMagnitude = sqrt(pow(acceleration.x, 2) + pow(acceleration.y, 2))
+                // 제곱 비교로 sqrt/pow 제거. 양수만 비교하므로 부호 안전.
+                let accelerationMagnitudeSquared = acceleration.x * acceleration.x + acceleration.y * acceleration.y
+                let shakeThreshold = appSettings.shakeAccelerationThreshold
+                let shakeThresholdSquared = shakeThreshold * shakeThreshold
 
-                if (oppositeDirectionOnX || oppositeDirectionOnY) && accelerationMagnitude > appSettings.shakeAccelerationThreshold && currentTime - lastShakeTime > shakeCoolDown {
+                if (oppositeDirectionOnX || oppositeDirectionOnY) && accelerationMagnitudeSquared > shakeThresholdSquared && currentTime - lastShakeTime > shakeCoolDown {
                     shakeMagnitudeCount += 1
                     
                     if shakeMagnitudeCount >= ((100000 - appSettings.shakeAccelerationThreshold) / 10000) {
@@ -1047,7 +1064,7 @@ func onMouseUp(event: NSEvent) {
     previousPosition = nil
     previousVelocity = nil
     previousTime = nil
-    lastShakeTime = Date().timeIntervalSince1970 + 0.75
+    lastShakeTime = CACurrentMediaTime() + 0.75
 
     guard !isQuickSnapping,
           isFitting
@@ -1100,9 +1117,9 @@ private func handleZoneMouseUp() {
 
             moveWindowToMatch(element: window, targetWindow: sectionWindow.window)
 
-            if let (screenNumber, workspaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() {
+            if let (screenId, workspaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() {
                 PlacedWindows.place(windowId: windowId,
-                                    screenNumber: screenNumber,
+                                    screenId: screenId,
                                     workspaceNumber: workspaceNumber,
                                     layoutName: userLayouts.currentLayoutName,
                                     sectionNumber: toLeaveSectionWindow!.number,
@@ -1161,9 +1178,9 @@ private func handleGridMouseUp() {
             retries: 10
         )
 
-        if let (screenNumber, workspaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() {
+        if let (screenId, workspaceNumber) = SpaceLayoutPreferences.getCurrentScreenAndSpace() {
             PlacedWindows.place(windowId: windowId,
-                                screenNumber: screenNumber,
+                                screenId: screenId,
                                 workspaceNumber: workspaceNumber,
                                 layoutName: userLayouts.currentLayoutName,
                                 sectionNumber: -1,
@@ -1227,28 +1244,27 @@ func cycleWindowsInZone(forward: Bool) {
 func getWindowsInSameZone(as windowId: UInt32) -> [(windowId: UInt32, element: AXUIElement)] {
     guard let sectionNumber = PlacedWindows.windows[windowId],
           let layoutName = PlacedWindows.layouts[windowId],
-          let screenNumber = PlacedWindows.screens[windowId],
-          let workspaceNumber = PlacedWindows.workspaces[windowId] else {
+          let screenId = PlacedWindows.screens[windowId],
+          let workspaceNumber = PlacedWindows.workspaces[windowId],
+          let candidates = PlacedWindows.bySection[sectionNumber] else {
         return []
     }
-    
+
+    // bySection 역인덱스로 같은 섹션 번호 후보만 순회 → 전체 PlacedWindows.windows 풀스캔 제거.
+    // layout/screen/workspace 매칭은 섹션 번호가 layout 간 재사용될 수 있어 그대로 유지.
     var windowsInZone: [(windowId: UInt32, element: AXUIElement)] = []
-    
-    for (otherWindowId, otherSectionNumber) in PlacedWindows.windows {
-        // Check if window is in the same zone (section, layout, screen, workspace)
-        if otherSectionNumber == sectionNumber,
-           PlacedWindows.layouts[otherWindowId] == layoutName,
-           PlacedWindows.screens[otherWindowId] == screenNumber,
+    windowsInZone.reserveCapacity(candidates.count)
+
+    for otherWindowId in candidates {
+        if PlacedWindows.layouts[otherWindowId] == layoutName,
+           PlacedWindows.screens[otherWindowId] == screenId,
            PlacedWindows.workspaces[otherWindowId] == workspaceNumber,
            let element = PlacedWindows.elements[otherWindowId] {
-            
             windowsInZone.append((windowId: otherWindowId, element: element))
         }
     }
-    
-    // Sort by window ID for consistent ordering
+
     windowsInZone.sort { $0.windowId < $1.windowId }
-    
     return windowsInZone
 }
 
