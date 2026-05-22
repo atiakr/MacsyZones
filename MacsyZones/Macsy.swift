@@ -278,10 +278,25 @@ func releaseAXObservers(for pid: pid_t) {
     retainedAXObservers.removeValue(forKey: pid)
 }
 
+private var cleanupScheduled = false
+private let cleanupDebounceInterval: TimeInterval = 0.1
+
 /// AX 알림에서 destroyed 가 들어왔을 때 호출. element 가 이미 dead 라 직접 id 추출이
 /// 불가능하므로 CGWindowList 의 살아있는 ID 집합과 비교해 PlacedWindows /
 /// OriginalWindowProperties 의 stale 항목을 일괄 청소한다.
+/// 트레일링 디바운스: 다중 윈도우 동시 종료 (앱 종료, Finder 일괄 닫기) 시 destroyed
+/// 알림이 폭주해 호출당 CGWindowList IPC + Set 빌드 비용이 누적되던 부분을 한 번으로 묶는다.
+/// 같은 윈도우 ID 들에 대한 unplace 는 idempotent 이므로 100ms 늦어져도 안전하다.
 func cleanupPlacedWindowsAgainstSystem() {
+    if cleanupScheduled { return }
+    cleanupScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + cleanupDebounceInterval) {
+        cleanupScheduled = false
+        performCleanupPlacedWindowsAgainstSystem()
+    }
+}
+
+private func performCleanupPlacedWindowsAgainstSystem() {
     guard let infoList = CGWindowListCopyWindowInfo([], kCGNullWindowID) as? [[String: Any]] else { return }
     let liveIds = Set(infoList.compactMap { $0[kCGWindowNumber as String] as? UInt32 })
 
@@ -384,9 +399,22 @@ var cachedSectionGeometries: [CachedSectionGeometry] = []
 /// area 오름차순 사전 정렬 사본. snapHighlightStrategy != .centerProximity 경로에서
 /// 마우스 무브당 발생하던 `sorted` 할당을 제거.
 var cachedSectionGeometriesByArea: [CachedSectionGeometry] = []
-var cachedSectionGeometriesKey: (layoutName: String, screenId: ObjectIdentifier, signature: CGFloat, count: Int)?
+/// screenFrameSignature: 해상도/스케일/원점 변경을 감지. 디스플레이 재구성 후 같은
+/// 섹션 percentage 가 다른 픽셀 영역으로 매핑되는데 sectionWindow.frame 만 합산하면
+/// 곧장 변하지 않는 짧은 윈도(레이아웃이 아직 reflow 되기 전)가 있어 신호를 놓칠 수 있다.
+var cachedSectionGeometriesKey: (layoutName: String, screenId: ObjectIdentifier, signature: CGFloat, screenFrameSignature: CGFloat, count: Int)?
 /// 직전 hover 와 동일하면 `orderFront(nil)` (윈도서버 IPC) 생략.
 var lastHoveredSectionWindow: SectionWindow?
+
+/// 디스플레이 재구성 시 캐시된 섹션 geometry 를 즉시 무효화한다.
+/// signature 가 자가-치유되긴 하지만, 그 사이의 hit-test 한두 틱이 옛 좌표계로
+/// 평가되어 오감지가 발생할 수 있어 명시적으로 비운다.
+func invalidateSectionGeometryCache() {
+    cachedSectionGeometriesKey = nil
+    cachedSectionGeometries = []
+    cachedSectionGeometriesByArea = []
+    lastHoveredSectionWindow = nil
+}
 
 func getHoveredSectionWindow() -> SectionWindow? {
     debugLog("getHoveredSectionWindow(): isFitting = \(isFitting)")
@@ -417,12 +445,18 @@ func getHoveredSectionWindow() -> SectionWindow? {
             signature += f.origin.x + f.origin.y + f.width + f.height
         }
 
+        // 해상도/원점만 바뀌고 sectionWindow.frame 이 아직 reflow 되지 않은 짧은 윈도에서도
+        // 캐시를 무효화해 옛 픽셀 좌표로 hit-test 하는 한두 틱을 막는다.
+        let sf = focusedScreen.frame
+        let screenFrameSignature: CGFloat = sf.origin.x + sf.origin.y + sf.width + sf.height
+
         let needsRecompute: Bool = {
             guard let key = cachedSectionGeometriesKey else { return true }
             return key.layoutName != currentLayoutName
                 || key.screenId != screenId
                 || key.count != sectionWindows.count
                 || key.signature != signature
+                || key.screenFrameSignature != screenFrameSignature
         }()
 
         if needsRecompute {
@@ -447,7 +481,7 @@ func getHoveredSectionWindow() -> SectionWindow? {
                 )
             }
             cachedSectionGeometriesByArea = cachedSectionGeometries.sorted { $0.area < $1.area }
-            cachedSectionGeometriesKey = (currentLayoutName, screenId, signature, sectionWindows.count)
+            cachedSectionGeometriesKey = (currentLayoutName, screenId, signature, screenFrameSignature, sectionWindows.count)
         }
 
         if appSettings.snapHighlightStrategy != .centerProximity && appSettings.prioritizeCenterToSnap {

@@ -197,11 +197,14 @@ class SpaceLayoutPreferences: UserData {
             queue: nil,
             using: { _ in
                 if #available(macOS 12.0, *) { quickSnapper.close() }
+                // 디스플레이 재구성: hit-test 캐시를 즉시 비워 옛 픽셀 좌표로 hover 가
+                // 잡히는 짧은 윈도를 제거. ScreenCache 는 동일 알림에서 self-invalidate.
+                invalidateSectionGeometryCache()
                 if !appSettings.selectPerDesktopLayout { return }
-                
+
                 if let layoutName = self.getCurrent() {
                     userLayouts.currentLayoutName = layoutName
-                    
+
                     for (_, layout) in userLayouts.layouts {
                         layout.hideAllWindows()
                     }
