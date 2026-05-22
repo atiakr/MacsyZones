@@ -52,6 +52,11 @@ var mouseDragMonitor: Any?
 var rightClickMonitor: Any?
 var shortcutMonitor: Any?
 
+/// NSWorkspace.notificationCenter `addObserver(forName:)` 블록형 등록의 토큰 저장소.
+/// target-action 형은 `removeObserver(self)` 로 일괄 해제되지만 블록형은 토큰별로
+/// 명시 해제해야 한다 — 누락 시 AppDelegate 가 종료되어도 observer 가 남아 누수된다.
+var workspaceObservers: [NSObjectProtocol] = []
+
 var isPreview: Bool {
     return ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
 }
@@ -108,8 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
             // 새로 실행되는 앱: app-level 옵저버 + (이미 떠 있는) 윈도우 enumerate.
             // 런치 직후엔 윈도우가 0 일 수 있는데, app 레벨 kAXWindowCreatedNotification 이
             // 잡아서 onObserverNotification 에서 새 창을 관찰 큐에 추가한다.
-            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
-                                                              object: nil, queue: nil) { notification in
+            // 반환 토큰은 workspaceObservers 에 모아 종료 시 removeObserver 로 일괄 해제.
+            let launchObs = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
+                                                                               object: nil, queue: nil) { notification in
                 if let userInfo = notification.userInfo,
                    let launchedApp = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
                     debugLog("Newly launched app is being observed: \(launchedApp)")
@@ -121,8 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
             }
 
             // 종료된 앱: 보유 중이던 AXObserver 해제 (메모리/IPC 누수 방지).
-            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
-                                                              object: nil, queue: nil) { notification in
+            let termObs = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
+                                                                             object: nil, queue: nil) { notification in
                 if let userInfo = notification.userInfo,
                    let terminatedApp = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
                     let pid = terminatedApp.processIdentifier
@@ -131,6 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                         cleanupPlacedWindowsAgainstSystem()
                     }
                 }
+            }
+
+            Task { @MainActor in
+                workspaceObservers.append(launchObs)
+                workspaceObservers.append(termObs)
             }
             
             Task { @MainActor in
@@ -358,6 +369,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
         var snapKeyUsed = false
         var prevFlags = NSEvent.ModifierFlags()
 
+        // 재진입 가드: 향후 설정 변경 등으로 monitorShortcuts() 가 다시 호출될 때
+        // 이전 토큰을 해제하지 않으면 두 모니터가 동시에 살아 콜백이 중복 호출된다.
+        if let prev = shortcutMonitor {
+            NSEvent.removeMonitor(prev)
+            shortcutMonitor = nil
+        }
+
         // 반환 토큰을 전역에 저장해 applicationWillTerminate 의 일괄 정리 루프에 포함되도록 한다.
         // 470eef1 에서 마우스 모니터들은 잡혔는데 여기만 누락돼 있었던 부분 동기화.
         shortcutMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
@@ -495,6 +513,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                 NSEvent.removeMonitor(monitor)
             }
         }
+        // 블록형 등록은 토큰별 명시 해제가 필요하다.
+        for token in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        workspaceObservers.removeAll()
+        // target-action 형 (monitorActivations) 은 self 참조 기반이라 일괄 제거 가능.
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
