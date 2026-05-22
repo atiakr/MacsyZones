@@ -95,29 +95,35 @@ func checkSnapKeyOnWindowMoveStart() {
 let spaceLayoutPreferences = SpaceLayoutPreferences()
 
 func getWindowUnderMouse() -> (element: AXUIElement, windowId: UInt32)? {
+    // NSEvent.mouseLocation 은 Cocoa 좌표계(좌하 원점, primary 디스플레이 (0,0)),
+    // kCGWindowBounds 는 CG 좌표계(좌상 원점, primary 디스플레이 (0,0)).
+    // 둘을 바로 비교하면 Y 가 뒤집힌 채로 hit-test 가 되어 멀티모니터에서 엉뚱한 윈도우가 잡힌다.
+    // primary 디스플레이 높이 기준으로 Y 를 flip 한 뒤 비교한다.
     let mouseLocation = NSEvent.mouseLocation
-    
+    let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+    let mouseCG = CGPoint(x: mouseLocation.x, y: primaryHeight - mouseLocation.y)
+
     guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
         return nil
     }
-    
+
     for windowInfo in windowList {
         guard let bounds = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
               let windowLayer = windowInfo[kCGWindowLayer as String] as? Int,
               let windowId = windowInfo[kCGWindowNumber as String] as? UInt32 else {
             continue
         }
-        
+
         if windowLayer != 0 { continue }
-        
+
         let x = bounds["X"] ?? 0
         let y = bounds["Y"] ?? 0
         let width = bounds["Width"] ?? 0
         let height = bounds["Height"] ?? 0
-        
-        if mouseLocation.x >= x && mouseLocation.x <= x + width &&
-           mouseLocation.y >= y && mouseLocation.y <= y + height {
-            
+
+        if mouseCG.x >= x && mouseCG.x <= x + width &&
+           mouseCG.y >= y && mouseCG.y <= y + height {
+
             if let element = retrieveFreshWindowElement(for: windowId) {
                 var subroleRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success {
@@ -128,7 +134,7 @@ func getWindowUnderMouse() -> (element: AXUIElement, windowId: UInt32)? {
             }
         }
     }
-    
+
     return nil
 }
 
