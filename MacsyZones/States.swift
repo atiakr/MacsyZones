@@ -13,11 +13,22 @@
 import Foundation
 import CoreGraphics
 
+/// 메인스레드 전용 mutation 보장을 위한 디버그 가드.
+/// AX 콜백, NSEvent monitor, NSWorkspace notification 등 모든 호출 경로가 main runloop /
+/// MainActor Task 안에서 실행되도록 설계돼 있으므로, 새 호출 경로가 다른 스레드에서
+/// PlacedWindows / OriginalWindowProperties 를 건드릴 경우 즉시 드러나도록 막는다.
+/// release 빌드에서는 precondition 이 비활성화되어 비용 없음.
+@inline(__always)
+private func assertWindowStateMainThread(_ where: StaticString = #function) {
+    assert(Thread.isMainThread, "WindowState mutation off main thread: \(`where`)")
+}
+
 class OriginalWindowProperties {
     static var windowSizeMap: [UInt32: CGSize] = [:]
     static var windowPositionMap: [UInt32: CGPoint] = [:]
-    
+
     static func update(windowID: UInt32) {
+        assertWindowStateMainThread()
         let windowList = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as NSArray?
         
         guard let windowInfoList = windowList as? [[String: AnyObject]], let windowInfo = windowInfoList.first else {
@@ -51,6 +62,7 @@ class OriginalWindowProperties {
     /// 시스템에 더 이상 존재하지 않는 windowID 들을 일괄 제거.
     /// AX destroyed 알림이 발생했을 때 cleanupPlacedWindowsAgainstSystem 에서 호출.
     static func purgeStale(liveIds: Set<UInt32>) {
+        assertWindowStateMainThread()
         for id in Array(windowSizeMap.keys) where !liveIds.contains(id) {
             windowSizeMap.removeValue(forKey: id)
             windowPositionMap.removeValue(forKey: id)
@@ -69,6 +81,7 @@ class PlacedWindows {
     static var bySection: [Int: Set<UInt32>] = [:]
 
     static func place(windowId: UInt32, screenId: String, workspaceNumber: Int, layoutName: String, sectionNumber: Int, element: AXUIElement) {
+        assertWindowStateMainThread()
         if let oldSection = windows[windowId], oldSection != sectionNumber {
             bySection[oldSection]?.remove(windowId)
             if bySection[oldSection]?.isEmpty == true { bySection.removeValue(forKey: oldSection) }
@@ -85,6 +98,7 @@ class PlacedWindows {
     }
 
     static func unplace(windowId: UInt32) {
+        assertWindowStateMainThread()
         if let oldSection = windows[windowId] {
             bySection[oldSection]?.remove(windowId)
             if bySection[oldSection]?.isEmpty == true { bySection.removeValue(forKey: oldSection) }
