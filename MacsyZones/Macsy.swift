@@ -279,18 +279,18 @@ func releaseAXObservers(for pid: pid_t) {
 }
 
 private var cleanupScheduled = false
-private let cleanupDebounceInterval: TimeInterval = 0.1
 
 /// AX 알림에서 destroyed 가 들어왔을 때 호출. element 가 이미 dead 라 직접 id 추출이
 /// 불가능하므로 CGWindowList 의 살아있는 ID 집합과 비교해 PlacedWindows /
 /// OriginalWindowProperties 의 stale 항목을 일괄 청소한다.
-/// 트레일링 디바운스: 다중 윈도우 동시 종료 (앱 종료, Finder 일괄 닫기) 시 destroyed
-/// 알림이 폭주해 호출당 CGWindowList IPC + Set 빌드 비용이 누적되던 부분을 한 번으로 묶는다.
-/// 같은 윈도우 ID 들에 대한 unplace 는 idempotent 이므로 100ms 늦어져도 안전하다.
+/// next-tick coalescing: 같은 runloop tick 에서 다수의 destroyed 알림이 들어와도 cleanup 은
+/// 1회만 수행 (CGWindowList IPC 비용 누적 방지). 지연은 0~1ms 수준이라 CGWindowID 재사용으로
+/// 스냅이 잠시 막히는 문제는 발생하지 않는다 — 100ms 트레일링 디바운스는 너무 길어
+/// 반응성을 해쳤음.
 func cleanupPlacedWindowsAgainstSystem() {
     if cleanupScheduled { return }
     cleanupScheduled = true
-    DispatchQueue.main.asyncAfter(deadline: .now() + cleanupDebounceInterval) {
+    DispatchQueue.main.async {
         cleanupScheduled = false
         performCleanupPlacedWindowsAgainstSystem()
     }
@@ -607,15 +607,11 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
         return
     }
 
-    // Fullscreen 앱: subrole 은 여전히 kAXStandardWindowSubrole 이라 위 가드를 통과한다.
-    // AXFullScreen 은 비공식이지만 안정적인 속성으로, snap 으로 좌표를 강제 변경하면
-    // macOS fullscreen lifecycle 과 충돌해 화면이 잠시 검게 깜빡이거나 Space 가 깨질 수
-    // 있으므로 명시적으로 제외한다.
-    var fullscreenRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(element, "AXFullScreen" as CFString, &fullscreenRef) == .success,
-       let isFullscreen = fullscreenRef as? Bool, isFullscreen {
-        return
-    }
+    // AXFullScreen 비공식 attribute 기반 fullscreen 가드는 fb246d2 에서 시도했으나,
+    // 일부 앱에서 비-fullscreen 윈도우에도 true 를 돌려 onWindowMoved 가 통째로 early
+    // return → 레이아웃 미표시 → 스냅 무반응을 야기. 사용자 보고 후 제거.
+    // fullscreen 상호 동작이 실제로 문제되면 좌표 기반 가드(window bounds == screen.frame)
+    // 또는 매니지드 fullscreen Space 감지 등 더 안전한 신호로 다시 접근할 것.
 
     var roleRef: CFTypeRef?
     AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
