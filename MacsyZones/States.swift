@@ -95,6 +95,7 @@ class PlacedWindows {
         workspaces[windowId] = workspaceNumber
 
         donationReminder.count()
+        Task { @MainActor in placedWindowsStore.scheduleSnapshot() }
     }
 
     static func unplace(windowId: UInt32) {
@@ -111,6 +112,7 @@ class PlacedWindows {
         workspaces.removeValue(forKey: windowId)
 
         donationReminder.count()
+        Task { @MainActor in placedWindowsStore.scheduleSnapshot() }
     }
     
     static func isPlaced(windowId: UInt32) -> Bool {

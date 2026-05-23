@@ -148,21 +148,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                 mouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { event in
                     onMouseDown(event: event)
                 }
-                
+
                 mouseDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged) { event in
                     onMouseDragged(event: event)
                 }
-                
+
                 mouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { event in
                     onMouseUp(event: event)
                 }
-                
+
                 spaceLayoutPreferences.startObserving()
                 monitorShortcuts()
                 monitorRightClick()
-                
+
                 spaceLayoutPreferences.switchToCurrent()
-                
+
+                // 영속화된 snap state 재부착: AX 옵저버 등록까지 끝난 뒤에 호출해야
+                // restore 가 부착한 윈도우들의 destroy/move 알림이 정상 라우팅된다.
+                placedWindowsStore.restore()
+
                 macsyReady.isReady = true
                 
                 if #available(macOS 12.0, *) {
@@ -343,24 +347,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     }
 
     @objc func handleAppActivation(_ notification: Notification) {
-        guard appSettings.selectPerDesktopLayout,
-              !isQuickSnapping,
+        guard !isQuickSnapping,
               !isEditing,
               !isFitting,
               !isSnapResizing
         else { return }
 
+        // Per-app override 가 per-desktop 보다 우선. 활성화된 앱의 bundleId 가 매핑돼
+        // 있으면 그 레이아웃으로 즉시 전환하고 per-desktop switch 는 건너뛴다.
+        if let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+           let bundleId = activatedApp.bundleIdentifier,
+           let layoutName = appLayoutPreferences.layoutName(for: bundleId) {
+            if userLayouts.currentLayoutName != layoutName {
+                userLayouts.currentLayoutName = layoutName
+            }
+            return
+        }
+
+        guard appSettings.selectPerDesktopLayout else { return }
         spaceLayoutPreferences.switchToCurrent()
     }
 
     @objc func handleWindowDidBecomeKey(_ notification: Notification) {
-        guard appSettings.selectPerDesktopLayout,
-              !isQuickSnapping,
+        guard !isQuickSnapping,
               !isEditing,
               !isFitting,
               !isSnapResizing
         else { return }
-        
+
+        // 활성화 알림과 달리 userInfo 에 앱이 없어 frontmost 로 대체.
+        if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           let layoutName = appLayoutPreferences.layoutName(for: bundleId) {
+            if userLayouts.currentLayoutName != layoutName {
+                userLayouts.currentLayoutName = layoutName
+            }
+            return
+        }
+
+        guard appSettings.selectPerDesktopLayout else { return }
         spaceLayoutPreferences.switchToCurrent()
     }
     

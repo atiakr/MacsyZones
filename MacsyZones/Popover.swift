@@ -179,8 +179,10 @@ struct Main: View {
     @Binding var page: String
     
     @ObservedObject var settings = appSettings
-    
+
     @ObservedObject var layouts = userLayouts
+    @ObservedObject var appLayouts = appLayoutPreferences
+    @ObservedObject var placedStore = placedWindowsStore
     
     @State var showAboutDialog = false
     @State var showResetToDefaultsDialog = false
@@ -622,7 +624,7 @@ struct Main: View {
                             Toggle("Per-desktop layouts", isOn: $settings.selectPerDesktopLayout)
                                 .toggleStyle(.checkbox)
                                 .onChange(of: settings.selectPerDesktopLayout) { _ in appSettings.save() }
-                            
+
                             Button(action: {
                                 resetDialogs()
                                 showDialog = true
@@ -634,7 +636,30 @@ struct Main: View {
                             }
                             .buttonStyle(BorderlessButtonStyle())
                         }
-                        
+
+                        HStack {
+                            Toggle("Per-app layouts", isOn: $appLayouts.enabled)
+                                .toggleStyle(.checkbox)
+                                .onChange(of: appLayouts.enabled) { _ in appLayoutPreferences.save() }
+
+                            if appLayouts.enabled {
+                                Button(action: { page = "appLayouts" }) {
+                                    Text("Manage...")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                                .foregroundColor(.accentColor)
+                            }
+                        }
+
+                        Toggle("Remember snapped windows across restarts", isOn: $placedStore.enabled)
+                            .toggleStyle(.checkbox)
+                            .onChange(of: placedStore.enabled) { newValue in
+                                placedWindowsStore.save()
+                                // 켰으면 즉시 현재 상태를 스냅샷해서 다음 부팅에 복원할 수 있게 한다.
+                                if newValue { placedWindowsStore.performSnapshot() }
+                            }
+
                         Divider().padding(.vertical, 2)
                         
                         Toggle("Shake to snap", isOn: $settings.shakeToSnap)
@@ -1255,6 +1280,145 @@ struct GridEditorView: View {
     }
 }
 
+struct AppLayoutsView: View {
+    @Binding var page: String
+    @ObservedObject var appLayouts = appLayoutPreferences
+    @ObservedObject var layouts = userLayouts
+
+    @State private var selectedBundleId: String = ""
+    @State private var selectedLayoutName: String = ""
+
+    /// regular activation policy 만 — 메뉴바/백그라운드 데몬 / Macsy 자신은 제외.
+    private var addableApps: [NSRunningApplication] {
+        let selfBundle = Bundle.main.bundleIdentifier
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .filter { ($0.bundleIdentifier ?? "").isEmpty == false }
+            .filter { $0.bundleIdentifier != selfBundle }
+            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+    }
+
+    private var layoutNames: [String] {
+        layouts.layouts.keys.sorted()
+    }
+
+    private func displayName(for bundleId: String) -> String {
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleId }),
+           let name = app.localizedName {
+            return name
+        }
+        return bundleId
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(action: { page = "main" }) {
+                    Image(systemName: "chevron.left")
+                    Text("Back")
+                }
+                .buttonStyle(PlainButtonStyle())
+                Spacer()
+                Text("Per-app Layouts").font(.headline)
+                Spacer()
+                Spacer().frame(width: 50)
+            }
+
+            Divider()
+
+            Text("Activating one of these apps switches MacsyZones to the assigned layout. Takes precedence over per-desktop layouts.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if appLayouts.mappings.isEmpty {
+                Text("No app mappings yet.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(appLayouts.mappings.keys.sorted(), id: \.self) { bundleId in
+                            HStack {
+                                Text(displayName(for: bundleId))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Picker("", selection: Binding(
+                                    get: { appLayouts.mappings[bundleId] ?? "" },
+                                    set: { newValue in
+                                        appLayoutPreferences.setMapping(bundleId: bundleId, layoutName: newValue)
+                                    }
+                                )) {
+                                    ForEach(layoutNames, id: \.self) { name in
+                                        Text(name).tag(name)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 140)
+
+                                Button(action: {
+                                    appLayoutPreferences.removeMapping(bundleId: bundleId)
+                                }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Add mapping").font(.caption).foregroundColor(.secondary)
+                HStack {
+                    Picker("", selection: $selectedBundleId) {
+                        Text("Select app...").tag("")
+                        ForEach(addableApps, id: \.processIdentifier) { app in
+                            if let bid = app.bundleIdentifier {
+                                Text(app.localizedName ?? bid).tag(bid)
+                            }
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+
+                    Picker("", selection: $selectedLayoutName) {
+                        Text("Layout").tag("")
+                        ForEach(layoutNames, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+
+                    Button("Add") {
+                        guard !selectedBundleId.isEmpty, !selectedLayoutName.isEmpty else { return }
+                        appLayoutPreferences.setMapping(bundleId: selectedBundleId, layoutName: selectedLayoutName)
+                        selectedBundleId = ""
+                        selectedLayoutName = ""
+                    }
+                    .disabled(selectedBundleId.isEmpty || selectedLayoutName.isEmpty)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(minWidth: 420)
+        .onAppear {
+            if selectedLayoutName.isEmpty, let first = layoutNames.first {
+                selectedLayoutName = first
+            }
+        }
+    }
+}
+
 struct TrayPopupView: View {
     @ObservedObject var ready = macsyReady
     @ObservedObject var proLock = macsyProLock
@@ -1296,6 +1460,8 @@ struct TrayPopupView: View {
                     GridEditorView(page: $page)
                 case "unlock":
                     UnlockProView(proLock: proLock, page: $page)
+                case "appLayouts":
+                    AppLayoutsView(page: $page)
                 default:
                     Main(proLock: proLock, page: $page)
                 }
