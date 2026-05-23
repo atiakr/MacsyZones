@@ -35,6 +35,16 @@ var isMovingAWindow = false
 var draggedWindowElement: AXUIElement?
 var draggedWindowInitialPosition: CGPoint?
 
+/// Cocoa 좌표계 (NSEvent.mouseLocation) 의 mouseDown 위치.
+/// 빠른 grab-release 시 onMouseUp 가 onWindowMoved AX 알림보다 먼저 처리돼 isFitting
+/// 이 켜지지 않은 채 가드에 막히는 회귀를 복구하기 위해 이동 거리 판정에 사용.
+var mouseDownLocation: CGPoint?
+
+/// mouseDown 시점에 (title bar 위 + snap 의도) 판정해 둔 플래그. 첫 mouseDragged 가
+/// 발생할 때 이 플래그가 true 면 layout 을 즉시 표시한다. 단순 클릭(mouseDragged 미발생)
+/// 에서는 layout flash 자체가 발생하지 않아 false-positive 차단.
+var dragStartIntent = false
+
 var windowMovingOnScreen: NSScreen? = nil
 var placedWindowMoveStartPosition: CGPoint?
 
@@ -141,10 +151,31 @@ func getWindowUnderMouse() -> (element: AXUIElement, windowId: UInt32)? {
 func onMouseDown(event: NSEvent) {
     draggedWindowElement = nil
     draggedWindowInitialPosition = nil
+    mouseDownLocation = NSEvent.mouseLocation
+    dragStartIntent = false
 
     if let preferredLayoutName = spaceLayoutPreferences.getCurrent() {
         userLayouts.currentLayoutName = preferredLayoutName
     }
+
+    guard macsyReady.isReady else { return }
+
+    // mouseDown 시점에 후보 윈도우 + 초기 좌표 캡처. mouseUp 시점의 getWindowUnderMouse 는
+    // CGWindowList snapshot stale 또는 window bounds 추격 실패로 매치 안 될 수 있음.
+    guard let hit = getWindowUnderMouse() else { return }
+    draggedWindowElement = hit.element
+    let (_, windowPosition) = getWindowSizeAndPosition(from: hit.windowId)
+    guard let initialPos = windowPosition else { return }
+    draggedWindowInitialPosition = initialPos
+
+    guard !isEditing, !isSnapResizing, !isQuickSnapping else { return }
+    guard shouldSnapFromKey() else { return }
+
+    // dragStartIntent = "이 mouseDown 이 윈도우 드래그로 이어질 수 있는 후보". 실제
+    // 윈도우 드래그인지는 첫 mouseDragged 에서 윈도우 좌표 변동으로 검증 — title bar
+    // Y 임계값(60pt) 같은 휴리스틱 대신 macOS 자체의 판정을 신뢰. 텍스트 선택/스크롤
+    // 같은 body 드래그는 윈도우가 안 움직여서 검증 단계에서 자동 제외.
+    dragStartIntent = true
 }
 
 func startEditing() {
@@ -1185,6 +1216,72 @@ func getFocusedWindowAXUIElement() -> AXUIElement? {
 }
 
 func onMouseDragged(event: NSEvent) {
+    guard macsyReady.isReady else { return }
+    guard dragStartIntent else { return }
+    guard !isEditing, !isSnapResizing, !isQuickSnapping else { return }
+    guard shouldSnapFromKey() else { return }
+
+    let currentLayout = userLayouts.currentLayout
+
+    // 검증 단계 — 윈도우 좌표가 실제로 변했는지로 "윈도우 드래그 vs body 드래그" 판정.
+    // macOS 가 mouseDown 을 윈도우 드래그로 인식했다면 좌표가 따라 움직임. 텍스트 선택,
+    // 스크롤 같은 body 드래그는 윈도우 좌표 불변. 임의의 title bar Y 임계값 없이 정확.
+    if !isFitting {
+        guard let candidate = draggedWindowElement,
+              let windowId = getWindowID(from: candidate),
+              let initialPos = draggedWindowInitialPosition else {
+            dragStartIntent = false
+            return
+        }
+        let (_, currentPosition) = getWindowSizeAndPosition(from: windowId)
+        guard let curPos = currentPosition else { return }
+        let wdx = curPos.x - initialPos.x
+        let wdy = curPos.y - initialPos.y
+
+        if (wdx * wdx + wdy * wdy) < 1 {
+            // 윈도우가 아직 안 움직임. 마우스가 충분히 움직였는데도 윈도우 위치가 그대로면
+            // body 드래그 (텍스트 선택 등) 로 확정 → latch off 해서 추가 IPC 차단.
+            if let downLoc = mouseDownLocation {
+                let now = NSEvent.mouseLocation
+                let mdx = now.x - downLoc.x
+                let mdy = now.y - downLoc.y
+                if (mdx * mdx + mdy * mdy) > 900 {  // 30pt² — 마우스 30pt 이동했는데 윈도우 그대로
+                    dragStartIntent = false
+                }
+            }
+            return
+        }
+
+        // 확정: 윈도우 드래그.
+        isMovingAWindow = true
+        setIsFitting(true)
+        switch currentLayout.layoutType {
+        case .zone:
+            currentLayout.layoutWindow.show()
+        case .grid:
+            currentLayout.gridLayoutWindow?.show()
+            currentLayout.gridLayoutWindow?.setAnchorAtMousePosition()
+        }
+    }
+
+    // 매 mouseDragged 마다 hover 갱신 — AX windowMoved 보다 빠른 신호로 hover 추격.
+    // 빠른 드래그 시 AX 알림이 듬성듬성 와서 toLeaveSectionWindow 가 옛 zone 에 머무는
+    // 문제 해결.
+    switch currentLayout.layoutType {
+    case .zone:
+        if let hovered = getHoveredSectionWindow() {
+            toLeaveSectionWindow = hovered
+            if let candidate = draggedWindowElement {
+                toLeaveElement = candidate
+            }
+        }
+    case .grid:
+        currentLayout.gridLayoutWindow?.updateSelectionToMousePosition()
+        if let candidate = draggedWindowElement {
+            toLeaveElement = candidate
+            toLeaveGridRect = currentLayout.gridLayoutWindow?.getSelectionAXRect()
+        }
+    }
 }
 
 func onMouseUp(event: NSEvent) {
@@ -1192,6 +1289,10 @@ func onMouseUp(event: NSEvent) {
 
     // Hide the layout switcher regardless of mode (actualMode or directMode).
     layoutSwitcherPanel.hide()
+
+    let downLoc = mouseDownLocation
+    mouseDownLocation = nil
+    dragStartIntent = false
 
     movingWindowInfo = nil
     isMovingAWindow = false
@@ -1201,9 +1302,38 @@ func onMouseUp(event: NSEvent) {
     previousTime = nil
     lastShakeTime = CACurrentMediaTime() + 0.75
 
-    guard !isQuickSnapping,
-          isFitting
-    else { return }
+    guard !isQuickSnapping else { return }
+
+    // mouseDown 에서 layout 을 선제적으로 띄웠지만 마우스가 거의 안 움직였다면
+    // 단순 focus 클릭으로 간주: layout hide 후 스냅 진행 없이 종료. 5pt² 게이트.
+    if isFitting, let downLoc = downLoc {
+        let now = NSEvent.mouseLocation
+        let dx = now.x - downLoc.x
+        let dy = now.y - downLoc.y
+        if (dx * dx + dy * dy) < 25 {
+            setIsFitting(false)
+            switch userLayouts.currentLayout.layoutType {
+            case .zone:
+                userLayouts.currentLayout.layoutWindow.hide()
+            case .grid:
+                userLayouts.currentLayout.gridLayoutWindow?.hide()
+            }
+            toLeaveElement = nil
+            toLeaveSectionWindow = nil
+            toLeaveGridRect = nil
+            draggedWindowElement = nil
+            draggedWindowInitialPosition = nil
+            return
+        }
+    }
+
+    // onWindowMoved 가 toLeaveElement 를 못 세팅한 채 도착했으면 mouseDown 에서
+    // 잡아둔 후보로 폴백.
+    if toLeaveElement == nil, let candidate = draggedWindowElement {
+        toLeaveElement = candidate
+    }
+
+    guard isFitting else { return }
 
     if isEditing || isSnapResizing || isQuickSnapping {
         setIsFitting(false)
