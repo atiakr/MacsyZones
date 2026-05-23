@@ -606,12 +606,22 @@ func onWindowMoved(observer: AXObserver, element: AXUIElement, notification: CFS
     if subrole != kAXStandardWindowSubrole {
         return
     }
-    
+
+    // Fullscreen 앱: subrole 은 여전히 kAXStandardWindowSubrole 이라 위 가드를 통과한다.
+    // AXFullScreen 은 비공식이지만 안정적인 속성으로, snap 으로 좌표를 강제 변경하면
+    // macOS fullscreen lifecycle 과 충돌해 화면이 잠시 검게 깜빡이거나 Space 가 깨질 수
+    // 있으므로 명시적으로 제외한다.
+    var fullscreenRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, "AXFullScreen" as CFString, &fullscreenRef) == .success,
+       let isFullscreen = fullscreenRef as? Bool, isFullscreen {
+        return
+    }
+
     var roleRef: CFTypeRef?
     AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
-    
+
     let role = roleRef as? String ?? "Unknown"
-    
+
     if role != kAXWindowRole {
         debugLog("Element is not a window! Role: \(role), Subrole: \(subrole)")
         return
