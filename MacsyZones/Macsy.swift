@@ -1255,12 +1255,60 @@ func onMouseDragged(event: NSEvent) {
         // 확정: 윈도우 드래그.
         isMovingAWindow = true
         setIsFitting(true)
+        windowMovingOnScreen = getFocusedScreen()
         switch currentLayout.layoutType {
         case .zone:
             currentLayout.layoutWindow.show()
         case .grid:
             currentLayout.gridLayoutWindow?.show()
             currentLayout.gridLayoutWindow?.setAnchorAtMousePosition()
+        }
+    }
+
+    // 모니터 횡단 검출 — NSEvent 경로 (60-120Hz) 가 AX onWindowMoved 보다 빠르므로
+    // 빠른 monitor 횡단 시 layout 이 따라오지 못하는 race 를 여기서 차단한다.
+    // AX onWindowMoved 의 cross-monitor 분기는 safety net 으로 남겨두되, 사용성은
+    // 이 경로가 결정한다.
+    if let currentScreen = getFocusedScreen(),
+       let lastScreen = windowMovingOnScreen,
+       lastScreen != currentScreen {
+        windowMovingOnScreen = currentScreen
+        toLeaveSectionWindow = nil
+        toLeaveGridRect = nil
+        invalidateSectionGeometryCache()
+
+        // 모니터별로 다른 layout 이 지정돼 있으면 (selectPerDesktopLayout) 새 모니터의
+        // 선호 layout 으로 전환해야 한다. 이걸 빼먹으면 옛 모니터 layout 이 새 모니터
+        // 좌표계로만 옮겨져 표시되어, 1:1 → 1:1:1 같은 zone 개수 차이가 무시된다.
+        let activeLayout: UserLayout
+        if appSettings.selectPerDesktopLayout,
+           let layoutName = spaceLayoutPreferences.getCurrent(),
+           layoutName != userLayouts.currentLayoutName {
+            // 이전 layout 의 section/grid window 를 명시적으로 숨겨야 한다 — show() 는
+            // 새 layout 인스턴스에만 작동하므로 옛 layout 의 windows 가 잔존한다.
+            switch currentLayout.layoutType {
+            case .zone:
+                for sw in currentLayout.layoutWindow.sectionWindows {
+                    sw.isHovered = false
+                    sw.window.orderOut(nil)
+                }
+                currentLayout.layoutWindow.hide()
+            case .grid:
+                currentLayout.gridLayoutWindow?.hide()
+            }
+            userLayouts.currentLayoutName = layoutName
+            activeLayout = userLayouts.currentLayout
+        } else {
+            activeLayout = currentLayout
+        }
+
+        switch activeLayout.layoutType {
+        case .zone:
+            activeLayout.layoutWindow.show()
+        case .grid:
+            activeLayout.gridLayoutWindow?.hide()
+            activeLayout.gridLayoutWindow?.show()
+            activeLayout.gridLayoutWindow?.setAnchorAtMousePosition()
         }
     }
 
