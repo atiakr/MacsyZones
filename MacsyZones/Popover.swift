@@ -307,7 +307,21 @@ struct Main: View {
                             .buttonStyle(BorderlessButtonStyle())
                         }
                         
-                        Picker("Select Layout", selection: $layouts.currentLayoutName) {
+                        // selection 을 custom Binding 으로 받아 영속화를 user-driven
+                        // 경로에만 격리한다. SwiftUI Picker 는 user 선택 시에만 setter
+                        // 를 호출하므로, 외부 코드가 `userLayouts.currentLayoutName` 을
+                        // 변경해도 (per-app override, cross-monitor, switchToCurrent 등)
+                        // setter 가 트리거되지 않아 의도치 않은 setCurrent 가 일어나지
+                        // 않는다. 외부 변경에 따른 display sync 는 별도 .onChange 가 담당.
+                        Picker("Select Layout", selection: Binding(
+                            get: { layouts.currentLayoutName },
+                            set: { newValue in
+                                guard !isFitting else { return }
+                                layouts.currentLayoutName = newValue
+                                spaceLayoutPreferences.setCurrent(layoutName: newValue)
+                                spaceLayoutPreferences.save()
+                            }
+                        )) {
                             ForEach(Array(layouts.layouts.keys), id: \.self) { name in
                                 Text(name)
                             }
@@ -321,14 +335,13 @@ struct Main: View {
                             }
                         }
                         .onChange(of: layouts.currentLayoutName) { _ in
+                            // display sync 만 — 영속화는 위 Binding setter 에서 처리.
                             guard !isFitting else { return }
 
                             let wasEditing = isEditing
                             stopEditing()
                             userLayouts.selectLayout(layouts.currentLayoutName)
                             if wasEditing { startEditing() }
-                            spaceLayoutPreferences.setCurrent(layoutName: layouts.currentLayoutName)
-                            spaceLayoutPreferences.save()
                         }
                         
                         HStack(alignment: .center, spacing: 2) {
