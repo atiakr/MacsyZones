@@ -456,7 +456,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                     if userLayouts.currentLayout.layoutType == .grid {
                         userLayouts.currentLayout.gridLayoutWindow?.setAnchorAtMousePosition()
                     }
-                } else if isFitting && snapKeyUsed {
+                } else if !snapEffective && isFitting {
+                    // 어떤 경로로 활성화됐든 (snap key 직접 / mouseDragged auto-snap)
+                    // 현재 key 상태가 snap 비활성이면 mid-drag 라도 layout 즉시 hide.
+                    // 사용자가 드래그 도중 snap 을 끄고 자유 이동/배치하려는 케이스.
+                    // onMouseDragged 는 이후 shouldSnapFromKey() 가드에서 no-op 되고,
+                    // 다시 key 토글하면 위 분기에서 (!isFitting && isMovingAWindow) 로
+                    // 재표시된다.
                     snapKeyUsed = false
                     setIsFitting(false)
                     if !isQuickSnapping {
