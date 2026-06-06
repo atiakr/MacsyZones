@@ -223,8 +223,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
     }
     
     func checkUpdateState() {
+        #if DEBUG
+        // Debug 빌드는 자가 업데이트하지 않는다 — 로컬 dev build 가 release 로 덮어쓰기되어
+        // ad-hoc 서명/번들 ID 가 바뀌고, 그 결과 TCC 권한이 무효화되는 회귀를 막는다.
+        debugLog("checkUpdateState(): skipping auto-update in DEBUG build")
+        return
+        #else
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
-        
+
         if updateState.hasFailedUpdate(currentVersion: currentVersion) {
             showUpdateFailedDialog()
         } else {
@@ -233,9 +239,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, Sen
                     updateState.clearUpdateAttempt()
                 }
             }
-            
+
             appUpdater.checkForUpdates()
         }
+        #endif
     }
     
     func showUpdateFailedDialog() {
